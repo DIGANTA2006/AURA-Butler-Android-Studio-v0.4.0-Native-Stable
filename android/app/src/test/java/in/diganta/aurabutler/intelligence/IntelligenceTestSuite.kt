@@ -384,16 +384,22 @@ class IntelligenceTestSuite {
         )
         coordinator.initialize()
 
-        coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.MINIMAL)
-        val minimal = coordinator.processRequest("Explain quantum physics.", context)
-        assertEquals(IntelligenceCoordinator.IntelligenceMode.MINIMAL, minimal.mode)
+        try {
+            coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.MINIMAL)
+            val minimal = coordinator.processRequest("Explain quantum physics.", context)
+            assertEquals(IntelligenceCoordinator.IntelligenceMode.MINIMAL, minimal.mode)
 
-        coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS)
-        val autonomous = coordinator.processRequest(
-            "Figure out my schedule and optimize it.",
-            context
-        )
-        assertEquals(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS, autonomous.mode)
+            coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS)
+            val autonomous = coordinator.processRequest(
+                "On your own, figure out my schedule and optimize it.",
+                context
+            )
+            assertEquals(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS, autonomous.mode)
+        } finally {
+            // Stop the scheduled executor started by AUTONOMOUS mode so the
+            // local JVM test process cannot be kept alive by non-daemon threads.
+            coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.MINIMAL)
+        }
     }
 
     @Test
