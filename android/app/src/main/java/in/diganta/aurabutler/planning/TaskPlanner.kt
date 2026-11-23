@@ -2,7 +2,9 @@ package `in`.diganta.aurabutler.planning
 
 import `in`.diganta.aurabutler.intelligence.ReasoningEngine
 import `in`.diganta.aurabutler.model.ConversationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -137,6 +139,7 @@ class TaskPlanner(
     suspend fun executePlan(
         planId: String,
         context: ConversationContext,
+        options: PlanOptions = PlanOptions(),
         onProgress: (Plan, TaskNode, TaskStatus) -> Unit = { _, _, _ -> }
     ): ExecutionResult = withContext(Dispatchers.IO) {
         val plan = planStore.get(planId) ?: throw IllegalArgumentException("Plan not found: $planId")
@@ -151,7 +154,7 @@ class TaskPlanner(
 
         try {
             // Build dependency graph
-            val taskMap = mutablePlan.tasks.associateBy { it.id }
+            val taskMap = mutablePlan.tasks.associateBy { it.id }.toMutableMap()
             val dependencyGraph = buildDependencyGraph(mutablePlan.tasks)
             val executionOrder = topologicalSort(dependencyGraph)
 
@@ -272,7 +275,7 @@ class TaskPlanner(
                 lastError = result.error
                 // Brief delay before retry
                 if (attempt < task.maxRetries) {
-                    Thread.sleep(1000 * (attempt + 1))
+                    delay(1_000L * (attempt + 1))
                 }
             }
         }
@@ -287,7 +290,7 @@ class TaskPlanner(
         )
     }
 
-    private fun executeSingleTask(task: TaskNode, context: ConversationContext): SingleTaskResult {
+    private suspend fun executeSingleTask(task: TaskNode, context: ConversationContext): SingleTaskResult {
         return try {
             when (task.type) {
                 TaskType.RESEARCH -> executeResearch(task, context)
@@ -298,6 +301,8 @@ class TaskPlanner(
                 TaskType.COMMUNICATION -> executeCommunication(task, context)
                 TaskType.DECISION -> executeDecision(task, context)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             SingleTaskResult(success = false, output = null, error = e.message)
         }
@@ -318,7 +323,7 @@ class TaskPlanner(
         SingleTaskResult(true, result, null)
     }
 
-    private fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
+    private suspend fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
         // Use reasoning engine for analysis
         val reasoningResult = reasoningEngine.reason(
             task = "Analyze: ${task.description}\nContext: ${task.toolArguments}",
@@ -419,6 +424,9 @@ class TaskPlanner(
             tasks
         }
     }
+
+    private fun String.containsAny(vararg values: String): Boolean =
+        values.any { contains(it, ignoreCase = true) }
 
     private fun inferTaskType(description: String): TaskType {
         val lower = description.lowercase()
