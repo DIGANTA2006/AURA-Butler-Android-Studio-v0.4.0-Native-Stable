@@ -34,6 +34,7 @@ import `in`.diganta.aurabutler.data.SecureStore
 import `in`.diganta.aurabutler.runtime.AuraRuntimeState
 import `in`.diganta.aurabutler.runtime.AuraRuntimeStateMachine
 import `in`.diganta.aurabutler.voice.AdaptiveSpeechDetector
+import `in`.diganta.aurabutler.voice.AudioCaptureEffects
 import `in`.diganta.aurabutler.voice.AuraVoiceRuntime
 import `in`.diganta.aurabutler.voice.FastSystemSpeaker
 import `in`.diganta.aurabutler.voice.OfflineWhisperEngine
@@ -43,6 +44,7 @@ import `in`.diganta.aurabutler.voice.VoiceAudioRecorder
 import `in`.diganta.aurabutler.voice.VoiceDiagnostics
 import `in`.diganta.aurabutler.voice.VoiceCommandClassifier
 import `in`.diganta.aurabutler.voice.SpeechContinuationStack
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -63,6 +65,12 @@ import kotlinx.coroutines.launch
  * native use-after-free protection from the original Android build.
  */
 class WakeWordService : Service() {
+    private sealed interface BargeInResult {
+        data object None : BargeInResult
+        data object WakeWord : BargeInResult
+        data class CapturedSpeech(val samples: FloatArray) : BargeInResult
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var processor: BackgroundCommandProcessor
     private lateinit var notifications: NotificationManager
@@ -711,9 +719,9 @@ class WakeWordService : Service() {
             return
         }
 
-        val interrupted = listenForWakeDuringSpeech(session)
-        if (!interrupted) {
-            // The wake monitor may return early after an audio-device error.
+        val interruption = listenForWakeDuringSpeech(session)
+        if (interruption == BargeInResult.None) {
+            // The monitor may return early after an audio-device error.
             // Do not resume a queued answer while this utterance is still playing.
             val expectedSpeechSeconds = (
                 MIN_SPEECH_COMPLETION_WAIT_SECONDS + clean.length / 8
@@ -731,7 +739,11 @@ class WakeWordService : Service() {
         }
 
         val remainingSpeech = session.remainingText()
-        val command = captureBargeInCommand()
+        val command = when (interruption) {
+            BargeInResult.None -> null
+            BargeInResult.WakeWord -> captureBargeInCommand()
+            is BargeInResult.CapturedSpeech -> captureBargeInCommand(interruption.samples)
+        }
 
         if (
             command.isNullOrBlank() ||
@@ -894,138 +906,195 @@ class WakeWordService : Service() {
 
     private fun listenForWakeDuringSpeech(
         session: FastSystemSpeaker.SpeechSession
-    ): Boolean {
+    ): BargeInResult {
         val spotter = createKeywordSpotter()
         checkMicrophonePermission()
         val recorder = VoiceAudioRecorder
             .createForBargeIn(SAMPLE_RATE)
             .also { activeRecorder = it }
+        val effects = AudioCaptureEffects.attach(recorder.audioSessionId)
         val stream = spotter.createStream()
         val buffer = ShortArray(WAKE_BUFFER_SAMPLES)
         var readFailures = 0
         val startedAt = SystemClock.elapsedRealtime()
-        val source = VoiceAudioRecorder.sourceName(
-            recorder.audioSource
-        )
+        val source = VoiceAudioRecorder.sourceName(recorder.audioSource)
+        val aecEnabled = effects.echoCancellationEnabled
+        val speechDetector = if (aecEnabled) {
+            AdaptiveSpeechDetector(
+                sampleRate = SAMPLE_RATE,
+                minimumThreshold = BARGE_IN_VAD_MINIMUM_RMS,
+                maximumThreshold = BARGE_IN_VAD_MAXIMUM_RMS,
+                noiseMultiplier = BARGE_IN_VAD_NOISE_MULTIPLIER,
+                startSpeechMs = BARGE_IN_VAD_START_MS,
+                endSilenceMs = BARGE_IN_VAD_END_SILENCE_MS,
+                initialWaitMs = BARGE_IN_VAD_MAX_WAIT_MS,
+                calibrationMs = BARGE_IN_VAD_CALIBRATION_MS
+            )
+        } else {
+            null
+        }
+
+        // Keep a bounded 500ms pre-roll so the first phonemes are preserved.
+        // Natural-speech interruption is enabled only when platform AEC is active.
+        val preRoll = ArrayDeque<FloatArray>()
+        var preRollSamples = 0
+        val preRollLimit = SAMPLE_RATE * BARGE_IN_PRE_ROLL_MS / 1_000
 
         return try {
             recorder.startRecording()
-            check(
-                recorder.recordingState ==
-                    AudioRecord.RECORDSTATE_RECORDING
-            ) {
+            check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                 "Android did not start AURA's barge-in microphone."
             }
 
             Log.i(
                 TAG,
-                "Barge-in wake microphone started with source=$source"
+                "Barge-in microphone started: source=" + source +
+                    ", aec=" + aecEnabled +
+                    ", ns=" + effects.noiseSuppressionEnabled
             )
 
-            while (
-                running &&
-                !session.isFinished()
-            ) {
-                val count = recorder.read(
-                    buffer,
-                    0,
-                    buffer.size
-                )
-
+            while (running && !session.isFinished()) {
+                val count = recorder.read(buffer, 0, buffer.size)
                 if (count <= 0) {
-                    if (
-                        session.isFinished() ||
-                        !running
-                    ) {
-                        return false
-                    }
+                    if (session.isFinished() || !running) return BargeInResult.None
                     if (++readFailures >= 8) {
-                        Log.w(
-                            TAG,
-                            "Barge-in microphone stopped returning audio"
-                        )
-                        return false
+                        Log.w(TAG, "Barge-in microphone stopped returning audio")
+                        return BargeInResult.None
                     }
                     continue
                 }
 
                 readFailures = 0
                 var squareSum = 0.0
-                for (index in 0 until count) {
+                val rawSamples = FloatArray(count) { index ->
                     val sample = buffer[index] / 32768.0f
                     squareSum += sample * sample
+                    sample
                 }
                 val rms = sqrt(squareSum / count).toFloat()
                 val gain = adaptiveWakeGain(rms)
-                val samples = FloatArray(count) { index ->
-                    (
-                        buffer[index] / 32768.0f * gain
-                    ).coerceIn(-1.0f, 1.0f)
+                val spotterSamples = FloatArray(count) { index ->
+                    (rawSamples[index] * gain).coerceIn(-1.0f, 1.0f)
                 }
 
-                stream.acceptWaveform(samples, SAMPLE_RATE)
-
+                // KWS remains active as a fast, explicit fallback even on
+                // devices that support the additional VAD interruption path.
+                stream.acceptWaveform(spotterSamples, SAMPLE_RATE)
                 while (spotter.isReady(stream)) {
                     spotter.decode(stream)
-                    val keyword = spotter
-                        .getResult(stream)
-                        .keyword
-
+                    val keyword = spotter.getResult(stream).keyword
                     if (keyword.isBlank()) continue
 
                     val withinStartupGrace =
-                        SystemClock.elapsedRealtime() -
-                            startedAt <
-                            BARGE_IN_STARTUP_GRACE_MS
-                    val likelySelfEcho =
-                        session.isSpeakingWakeWord()
-
+                        SystemClock.elapsedRealtime() - startedAt < BARGE_IN_STARTUP_GRACE_MS
+                    val likelySelfEcho = session.isSpeakingWakeWord()
                     spotter.reset(stream)
 
-                    if (
-                        withinStartupGrace ||
-                        likelySelfEcho
-                    ) {
-                        Log.i(
-                            TAG,
-                            "Ignored probable self-echo wake during speech"
-                        )
+                    if (withinStartupGrace || likelySelfEcho) {
+                        Log.i(TAG, "Ignored probable self-echo wake during speech")
                         continue
                     }
 
                     Log.i(
                         TAG,
                         "Owner interrupted speech with wake word: " +
-                            "$keyword, rms=$rms, source=$source"
+                            keyword + ", rms=" + rms + ", source=" + source
                     )
                     session.stop()
-                    return true
+                    return BargeInResult.WakeWord
+                }
+
+                val detector = speechDetector
+                if (detector != null) {
+                    preRoll.addLast(rawSamples)
+                    preRollSamples += count
+                    while (preRollSamples > preRollLimit && preRoll.isNotEmpty()) {
+                        preRollSamples -= preRoll.removeFirst().size
+                    }
+
+                    val hadSpeech = detector.heardSpeech
+                    detector.observe(rms, count)
+                    if (!hadSpeech && detector.heardSpeech) {
+                        // Require sustained speech after the VAD's calibration
+                        // and start-duration checks; a single echo/noise burst
+                        // cannot interrupt TTS.
+                        session.stop()
+                        updateNotification("AURA detected your voice • capturing your command")
+                        Log.i(TAG, "Natural-speech barge-in detected with platform AEC")
+
+                        val chunks = ArrayList<FloatArray>(preRoll.size + 8)
+                        chunks.addAll(preRoll)
+                        var capturedSamples = preRollSamples
+                        var captureReadFailures = 0
+                        val maximumSamples = SAMPLE_RATE * MAX_BARGE_IN_CAPTURE_SECONDS
+
+                        // Keep the same AudioRecord session open; do not switch
+                        // microphone sources between interruption and ASR.
+                        while (running && capturedSamples < maximumSamples) {
+                            val extraCount = recorder.read(buffer, 0, buffer.size)
+                            if (extraCount <= 0) {
+                                if (++captureReadFailures >= 8) break
+                                continue
+                            }
+                            captureReadFailures = 0
+                            val extra = FloatArray(extraCount) { index ->
+                                buffer[index] / 32768.0f
+                            }
+                            chunks += extra
+                            capturedSamples += extraCount
+
+                            var extraSquareSum = 0.0
+                            for (sample in extra) extraSquareSum += sample * sample
+                            val extraRms = sqrt(extraSquareSum / extraCount).toFloat()
+                            if (
+                                detector.observe(extraRms, extraCount) ==
+                                AdaptiveSpeechDetector.Decision.END_OF_SPEECH
+                            ) {
+                                break
+                            }
+                        }
+
+                        val merged = FloatArray(capturedSamples)
+                        var offset = 0
+                        chunks.forEach { chunk ->
+                            val copyCount = minOf(chunk.size, merged.size - offset)
+                            if (copyCount > 0) {
+                                chunk.copyInto(merged, offset, 0, copyCount)
+                                offset += copyCount
+                            }
+                        }
+                        return BargeInResult.CapturedSpeech(merged)
+                    }
                 }
             }
 
-            false
+            BargeInResult.None
         } catch (error: Exception) {
             Log.w(
                 TAG,
-                "Barge-in listening was unavailable; " +
-                    "continuing the current reply",
+                "Barge-in listening unavailable; continuing the current reply",
                 error
             )
-            false
+            BargeInResult.None
         } finally {
             runCatching { stream.release() }
             runCatching { spotter.release() }
+            effects.close()
             releaseRecorder()
         }
     }
 
-    private suspend fun captureBargeInCommand(): String? {
+    private suspend fun captureBargeInCommand(
+        preCapturedSamples: FloatArray? = null
+    ): String? {
         markServiceState(true, "speech_interrupted")
-        updateNotification(
-            "Aura heard you • speak the new command after the tone"
-        )
-        playReadyTone()
-        delay(BARGE_IN_COMMAND_DELAY_MS)
+        if (preCapturedSamples == null) {
+            updateNotification("Aura heard the wake phrase • speak after the tone")
+            playReadyTone()
+            delay(BARGE_IN_COMMAND_DELAY_MS)
+        } else {
+            updateNotification("AURA captured your speech • understanding it privately")
+        }
 
         VoiceDiagnostics.mark(
             this,
@@ -1037,11 +1106,9 @@ class WakeWordService : Service() {
         )
 
         val settings = store.loadSettings()
-        AuraVoiceRuntime.prepareWhisper(
-            settings.speechLanguage
-        )
+        AuraVoiceRuntime.prepareWhisper(settings.speechLanguage)
 
-        val samples = captureCommand()
+        val samples = preCapturedSamples ?: captureCommand()
         if (!running) {
             AuraVoiceRuntime.discardPreparedWhisper()
             return null
@@ -1218,6 +1285,15 @@ class WakeWordService : Service() {
         private const val MAX_PENDING_SPEECH_CONTINUATIONS = 6
         private const val BARGE_IN_STARTUP_GRACE_MS = 650L
         private const val BARGE_IN_COMMAND_DELAY_MS = 105L
+        private const val BARGE_IN_VAD_MINIMUM_RMS = 0.0085f
+        private const val BARGE_IN_VAD_MAXIMUM_RMS = 0.065f
+        private const val BARGE_IN_VAD_NOISE_MULTIPLIER = 3.1f
+        private const val BARGE_IN_VAD_START_MS = 360
+        private const val BARGE_IN_VAD_END_SILENCE_MS = 720
+        private const val BARGE_IN_VAD_MAX_WAIT_MS = 90_000
+        private const val BARGE_IN_VAD_CALIBRATION_MS = 320
+        private const val BARGE_IN_PRE_ROLL_MS = 500
+        private const val MAX_BARGE_IN_CAPTURE_SECONDS = 25
         private const val MIN_SPEECH_COMPLETION_WAIT_SECONDS = 8
         private const val MAX_SPEECH_COMPLETION_WAIT_SECONDS = 90
         private const val TAG = "AuraWakeService"
