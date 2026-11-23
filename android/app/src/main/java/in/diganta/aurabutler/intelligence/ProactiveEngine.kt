@@ -221,11 +221,12 @@ class ProactiveEngine(
      * Mark a suggestion as accepted and execute its action.
      */
     suspend fun acceptSuggestion(id: String, context: ConversationContext): Boolean {
-        return suggestions[id]?.let { suggestion ->
+        val suggestion = suggestions[id] ?: return false
+        val executed = executeAction(suggestion.action, context)
+        if (executed) {
             suggestions[id] = suggestion.copy(accepted = true)
-            executeAction(suggestion.action, context)
-            true
-        } ?: false
+        }
+        return executed
     }
 
     /**
@@ -249,9 +250,12 @@ class ProactiveEngine(
             name = "Daily Briefing",
             description = "Generates a morning summary of schedule, weather, and priorities",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
-            task = { ctx ->
-                val suggestions = generateDailyBriefing(ctx)
-                AgentResult(true, "Daily briefing generated", suggestions = suggestions)
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Daily briefing is unavailable: calendar and weather data sources are not connected.",
+                    error = "Daily briefing integrations are not configured."
+                )
             }
         ))
 
@@ -323,9 +327,12 @@ class ProactiveEngine(
             name = "Habit Learning",
             description = "Detects recurring patterns and suggests automations",
             schedule = AgentSchedule.WEEKLY,
-            task = { ctx ->
-                val suggestions = detectHabitPatterns(ctx)
-                AgentResult(true, "Habit analysis completed", suggestions = suggestions)
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Habit analysis is unavailable until real usage signals are connected.",
+                    error = "No usage-history source is configured."
+                )
             }
         ))
 
@@ -334,9 +341,12 @@ class ProactiveEngine(
             name = "Research Follow-up",
             description = "Checks for updates on previous research topics",
             schedule = AgentSchedule.DAILY,
-            task = { ctx ->
-                val suggestions = checkResearchUpdates(ctx)
-                AgentResult(true, "Research follow-up completed", suggestions = suggestions)
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Research follow-up is unavailable until prior research topics and a live update source are connected.",
+                    error = "Research update source is not configured."
+                )
             }
         ))
     }
@@ -618,52 +628,14 @@ class ProactiveEngine(
     }
 
     private fun generateDailyBriefing(ctx: AgentContext): List<ProactiveSuggestion> {
-        val suggestions = mutableListOf<ProactiveSuggestion>()
-        
-        suggestions += ProactiveSuggestion(
-            type = SuggestionType.PREPARATION,
-            title = "Daily Briefing Ready",
-            description = "Your morning summary is ready with weather, schedule, and top priorities.",
-            action = ProactiveAction(
-                type = ProactiveEngine.ActionType.SHOW_INSIGHT,
-                payload = mapOf(
-                    "type" to "daily_briefing",
-                    "weather" to "Sunny, 22°C",
-                    "schedule" to "3 meetings, 2 tasks",
-                    "priorities" to "Project review, Team sync, Code review"
-                ),
-                requiresConfirmation = false
-            ),
-            confidence = 0.9,
-            priority = Priority.HIGH,
-            context = SuggestionContext(
-                trigger = Trigger.TIME_BASED,
-                timeRelevance = ProactiveEngine.TimeRelevance.MORNING
-            )
-        )
-        
-        return suggestions
+        // Calendar and weather integrations are not connected; do not invent data.
+        return emptyList()
     }
 
+
     private fun detectHabitPatterns(ctx: AgentContext): List<ProactiveSuggestion> {
-        val suggestions = mutableListOf<ProactiveSuggestion>()
-        
-        // Simplified - would analyze actual usage patterns
-        suggestions += ProactiveSuggestion(
-            type = SuggestionType.AUTOMATION,
-            title = "Automation Opportunity",
-            description = "You often open YouTube and search for music after saying 'play'. Want a shortcut?",
-            action = ProactiveAction(
-                type = ProactiveEngine.ActionType.ASK_QUESTION,
-                payload = mapOf("question" to "Create 'play music' shortcut?"),
-                requiresConfirmation = true
-            ),
-            confidence = 0.6,
-            priority = Priority.LOW,
-            context = SuggestionContext(trigger = Trigger.USER_HABIT)
-        )
-        
-        return suggestions
+        // No genuine usage-history source is connected yet.
+        return emptyList()
     }
 
     private fun checkResearchUpdates(ctx: AgentContext): List<ProactiveSuggestion> {
@@ -686,23 +658,13 @@ class ProactiveEngine(
         return settings.proactiveSuggestionsEnabled
     }
 
-    private suspend fun executeAction(action: ProactiveAction, context: ConversationContext) {
-        // In production, integrate with action execution system
-        when (action.type) {
-            ProactiveEngine.ActionType.SHOW_NOTIFICATION -> {
-                // Show notification
-            }
-            ProactiveEngine.ActionType.ASK_QUESTION -> {
-                // Queue question for next interaction
-            }
-            ProactiveEngine.ActionType.RUN_COMMAND -> {
-                // Execute command
-            }
-            ProactiveEngine.ActionType.OPEN_APP -> {
-                // Open app
-            }
-            else -> {}
-        }
+    private suspend fun executeAction(
+        action: ProactiveAction,
+        context: ConversationContext
+    ): Boolean {
+        // Suggestions are metadata only until a reviewed action executor is
+        // injected. Never mark a suggestion accepted after a no-op.
+        return false
     }
 
     interface ContextProvider {
