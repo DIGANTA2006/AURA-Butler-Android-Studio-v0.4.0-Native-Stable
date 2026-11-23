@@ -81,20 +81,28 @@ class LocalButlerEngineTest {
 
     @Test
     fun newsLookupPropagatesCallerCancellation() = runBlocking {
+        var headlineCalls = 0
         val cancellingLive = object : LiveInfoProvider {
             override suspend fun weather(settings: ButlerSettings): String = "Clear."
 
-            override suspend fun headlines(limit: Int): List<String> {
+            override suspend fun headlines(limit: Int): List<String> = emptyList()
+
+            override suspend fun headlinesFor(limit: Int, topic: String?): List<String> {
+                headlineCalls++
                 throw CancellationException("news cancelled by caller")
             }
         }
 
-        val error = runCatching {
-            LocalButlerEngine(cancellingLive).chat("Show me the news", context)
-        }.exceptionOrNull()
+        var propagated = false
+        try {
+            LocalButlerEngine(cancellingLive).chat("Tell me the headlines", context)
+        } catch (cancelled: CancellationException) {
+            propagated = true
+            assertEquals("news cancelled by caller", cancelled.message)
+        }
 
-        assertTrue(error is CancellationException)
-        assertEquals("news cancelled by caller", error?.message)
+        assertEquals(1, headlineCalls)
+        assertTrue("The live news cancellation must reach the caller.", propagated)
     }
 
     @Test
