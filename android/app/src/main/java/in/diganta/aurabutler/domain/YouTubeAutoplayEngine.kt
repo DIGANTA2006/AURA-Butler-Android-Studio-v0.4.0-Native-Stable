@@ -13,6 +13,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.UUID
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import kotlinx.coroutines.withTimeoutOrNull
 
 class YouTubeAutoplayEngine(
@@ -62,7 +63,7 @@ class YouTubeAutoplayEngine(
         val repair = withTimeoutOrNull(
             COMMAND_REPAIR_TIMEOUT_MS
         ) {
-            runCatching {
+            runCatchingCancellable {
                 commandInterpreter.repairCommand(
                     raw = "play $localQuery on YouTube",
                     settings = context.settings,
@@ -109,7 +110,7 @@ class YouTubeAutoplayEngine(
         val resolved = withTimeoutOrNull(
             YOUTUBE_RESOLVE_TIMEOUT_MS
         ) {
-            runCatching {
+            runCatchingCancellable {
                 resolver.resolve(
                     query = correctedQuery,
                     apiKey = youtubeKey
