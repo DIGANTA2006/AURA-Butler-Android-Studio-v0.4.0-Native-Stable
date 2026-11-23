@@ -80,7 +80,7 @@ class ProactiveEngine(
     data class SuggestionContext(
         val trigger: Trigger,
         val relatedMemoryIds: List<String> = emptyList(),
-        val timeRelevance: TimeRelevance = ProactiveEngine.TimeRelevance.ANYTIME,
+        val timeRelevance: ProactiveEngine.TimeRelevance = ProactiveEngine.TimeRelevance.ANYTIME,
         val locationRelevance: String? = null
     )
 
@@ -490,7 +490,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.AFTERNOON
+                        timeRelevance = ProactiveEngine.TimeRelevance.AFTERNOON
                     )
                 )
             }
@@ -509,7 +509,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.EVENING
+                        timeRelevance = ProactiveEngine.TimeRelevance.EVENING
                     )
                 )
             }
@@ -528,7 +528,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.NIGHT
+                        timeRelevance = ProactiveEngine.TimeRelevance.NIGHT
                     )
                 )
             }
@@ -638,7 +638,7 @@ class ProactiveEngine(
             priority = Priority.HIGH,
             context = SuggestionContext(
                 trigger = Trigger.TIME_BASED,
-                timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.MORNING
+                timeRelevance = ProactiveEngine.TimeRelevance.MORNING
             )
         )
         
@@ -675,10 +675,10 @@ class ProactiveEngine(
         // Check time relevance
         val hour = java.time.LocalDateTime.now().hour
         when (suggestion.context.timeRelevance) {
-            SuggestionContext.ProactiveEngine.TimeRelevance.MORNING -> if (hour !in 6..11) return false
-            SuggestionContext.ProactiveEngine.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
-            SuggestionContext.ProactiveEngine.TimeRelevance.EVENING -> if (hour !in 17..21) return false
-            SuggestionContext.ProactiveEngine.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
+            ProactiveEngine.TimeRelevance.MORNING -> if (hour !in 6..11) return false
+            ProactiveEngine.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
+            ProactiveEngine.TimeRelevance.EVENING -> if (hour !in 17..21) return false
+            ProactiveEngine.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
             else -> {}
         }
         
