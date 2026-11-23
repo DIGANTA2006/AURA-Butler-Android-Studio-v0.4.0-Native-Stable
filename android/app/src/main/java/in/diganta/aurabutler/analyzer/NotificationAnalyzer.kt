@@ -81,6 +81,7 @@ class NotificationAnalyzer(
         val cloudText = if (
             detailed &&
             !locked &&
+            settings.analyzerEnabled &&
             settings.cloudAnalyzerSummaries &&
             settings.aiEnabled &&
             settings.geminiApiKey.isNotBlank() &&
