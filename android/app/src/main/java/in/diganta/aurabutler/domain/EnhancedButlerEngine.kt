@@ -7,13 +7,9 @@ import `in`.diganta.aurabutler.intelligence.ProactiveEngine
 import `in`.diganta.aurabutler.intelligence.ReasoningEngine
 import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.planning.TaskPlanner
-import `in`.diganta.aurabutler.model.ActionKind
-import `in`.diganta.aurabutler.model.ActionRisk
-import `in`.diganta.aurabutler.model.ButlerAction
 import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
-import `in`.diganta.aurabutler.model.MemoryItem
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
@@ -195,60 +191,42 @@ class EnhancedButlerEngine(
         val coordinator = intelligenceCoordinator!!
         val result = coordinator.processRequest(message, context)
         
-        // Convert IntelligenceResult to ButlerReply
-        val actions = mutableListOf<ButlerAction>()
-        val memories = mutableListOf<MemoryItem>()
-        
-        // If there's a plan, add execution action
-        result.plan?.let { plan ->
-            actions += ButlerAction(
-                id = UUID.randomUUID().toString(),
-                kind = ActionKind.OPEN_APP,
-                title = "Execute plan: ${plan.description}",
-                summary = "Plan with ${plan.tasks.size} steps: ${plan.tasks.map { it.title }.joinToString(", ")}",
-                risk = ActionRisk.MEDIUM,
-                payload = mapOf(
-                    "planId" to plan.id,
-                    "autoExecute" to "false"
-                )
-            )
-        }
-        
-        // Add proactive suggestions as implicit actions
-        if (result.suggestions.isNotEmpty()) {
-            val topSuggestion = result.suggestions.first()
-            actions += ButlerAction(
-                id = UUID.randomUUID().toString(),
-                kind = ActionKind.OPEN_APP,
-                title = "Suggestion: ${topSuggestion.title}",
-                summary = topSuggestion.description,
-                risk = ActionRisk.LOW,
-                payload = mapOf(
-                    "suggestionId" to topSuggestion.id,
-                    "type" to "proactive"
-                )
-            )
-        }
-        
-        // If reasoning trace exists, add it as context
-        var responseText = result.response
-        if (result.reasoningTrace != null && result.reasoningTrace!!.isNotEmpty()) {
-            // Optionally include reasoning summary
-            val reasoningSummary = result.reasoningTrace!!
-                .filter { it.type == ReasoningEngine.StepType.CONCLUSION }
-                .map { it.content }
-                .joinToString(" ")
-            if (reasoningSummary.isNotBlank()) {
-                responseText = "$responseText\n\n[Reasoning: $reasoningSummary]"
+        // The current planner/proactive integrations expose metadata only.
+        // Do not turn those records into OPEN_APP actions (which require an
+        // actual app package) or expose internal reasoning traces as a reply.
+        val responseText = buildString {
+            append(result.response)
+            result.plan?.let { plan ->
+                append("\n\nPlan: ")
+                append(plan.title)
+                append(" (")
+                append(plan.tasks.size)
+                append(" steps).")
+                if (plan.status == TaskPlanner.PlanStatus.DRAFT ||
+                    plan.status == TaskPlanner.PlanStatus.ACTIVE
+                ) {
+                    append(" No unsupported external actions have been performed.")
+                }
+            }
+            if (result.suggestions.isNotEmpty()) {
+                append("\n\nSuggestions:")
+                result.suggestions.take(3).forEach { suggestion ->
+                    append("\n• ")
+                    append(suggestion.title)
+                    append(": ")
+                    append(suggestion.description)
+                }
             }
         }
-        
+
         return ButlerReply(
             assistantMessage = responseText,
-            speechText = responseText.replace(Regex("""https?://\S+"""), "the prepared link")
-                .replace(Regex("""\[Reasoning:.*\]"""), ""),
-            pendingActions = actions,
-            memoryWrites = memories
+            speechText = responseText.replace(
+                Regex("""https?://\\S+"""),
+                "the prepared link"
+            ),
+            pendingActions = emptyList(),
+            memoryWrites = emptyList()
         )
     }
 
