@@ -8,7 +8,7 @@
 
 ## 1. Inventory scope
 
-This inventory is generated from the repository's recursive Git tree, not from a hand-written 96-file list. The repository contains **596 tracked files**, **98 production Kotlin source files**, and **30 Kotlin test/instrumentation source files** at this snapshot. Before this PR's additions, the source tree contained 96 production Kotlin files and 29 Kotlin test files; this PR adds two production voice classes and one unit-test file.
+This inventory is generated from the repository's recursive Git tree, not from a hand-written 96-file list. The repository contains **598 tracked files**, **98 production Kotlin source files**, and **30 Kotlin test/instrumentation source files** at this snapshot. Before this PR's additions, the source tree contained 96 production Kotlin files and 29 Kotlin test files; this PR adds two production voice classes and one unit-test file.
 
 This is a source inventory and initial architecture map. It does **not** claim that every listed feature has completed a line-by-line audit or passed runtime verification. Each domain must be audited against actual call sites, configuration, tests, and device behaviour before being marked complete.
 
