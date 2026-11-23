@@ -2,13 +2,13 @@
 
 **Repository:** `DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable`  
 **Default branch:** `main`  
-**Working branch:** `feat/voice-continuity-command-validation`  
+**Working branch:** `feat/aura-domain-logic-upgrade`  
 **Inventory snapshot:** 2026-11-23  
 **PR-branch Android version:** `0.17.3-voice-continuity` (versionCode 28), min API 26, target API 36, Java/Kotlin 17.
 
 ## 1. Inventory scope
 
-This inventory is generated from the repository's recursive Git tree, not from a hand-written 96-file list. The repository contains **598 tracked files**, **98 production Kotlin source files**, and **30 Kotlin test/instrumentation source files** at this snapshot. Before this PR's additions, the source tree contained 96 production Kotlin files and 29 Kotlin test files; this PR adds two production voice classes and one unit-test file.
+This inventory is generated from the repository's recursive Git tree, not from a hand-written 96-file list. The live feature-branch tree contains **604 tracked files**, **100 production Kotlin source files**, and **34 Kotlin test/instrumentation source files** at this snapshot. Counts are taken from the recursive Git tree and include the current cross-domain implementation and regression tests.
 
 This is a source inventory and initial architecture map. It does **not** claim that every listed feature has completed a line-by-line audit or passed runtime verification. Each domain must be audited against actual call sites, configuration, tests, and device behaviour before being marked complete.
 
@@ -145,13 +145,14 @@ Multi-step task planning and dependency execution
 
 - `android/app/src/main/java/in/diganta/aurabutler/planning/TaskPlanner.kt`
 
-### runtime — 12 source files
+### runtime — 13 source files
 
 Runtime state, intent routing, capability policy, injection defense, auditing, crash journal, endpoint validation, redaction, quality gates, and budget policy
 
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/ActionAuditLog.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/AuraRuntimeState.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/CapabilityPolicy.kt`
+- `android/app/src/main/java/in/diganta/aurabutler/runtime/CoroutineSafety.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/LocalCrashJournal.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/ProductionIntentRouter.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/runtime/PromptInjectionGuard.kt`
@@ -176,11 +177,12 @@ Compose application surfaces and theme
 - `android/app/src/main/java/in/diganta/aurabutler/ui/AuraApp.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/ui/theme/Theme.kt`
 
-### voice — 16 source files
+### voice — 17 source files
 
 Audio capture, wake/ASR/TTS, owner speaker checks, VAD, transcript/speech sanitation, diagnostics, and interruption handling
 
 - `android/app/src/main/java/in/diganta/aurabutler/voice/AdaptiveSpeechDetector.kt`
+- `android/app/src/main/java/in/diganta/aurabutler/voice/AudioCaptureEffects.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/voice/AuraVoiceRuntime.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/voice/FastSystemSpeaker.kt`
 - `android/app/src/main/java/in/diganta/aurabutler/voice/OfflineWhisperEngine.kt`
@@ -199,13 +201,14 @@ Audio capture, wake/ASR/TTS, owner speaker checks, VAD, transcript/speech sanita
 
 ## 3. Existing Kotlin test and instrumentation inventory
 
-The test source tree currently contains 30 Kotlin test files. The current total includes the new voice command/continuation tests in this PR.
+The test source tree currently contains 34 Kotlin test/instrumentation files. The inventory below is reconciled against the current feature-branch Git tree.
 
 - `android/app/src/androidTest/java/in/diganta/aurabutler/background/WakeWordServiceForegroundContractTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/analyzer/NotificationClassifierTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/data/ButlerSystemPromptTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/data/DeepResearchProviderTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/data/HybridAiProviderRoutingTest.kt`
+- `android/app/src/test/java/in/diganta/aurabutler/data/SafeHttpClientTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/data/YouTubeVideoResolverTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/document/RepositoryIntelligenceTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/domain/ActionSafetyPolicyTest.kt`
@@ -221,13 +224,16 @@ The test source tree currently contains 30 Kotlin test files. The current total 
 - `android/app/src/test/java/in/diganta/aurabutler/domain/YouTubeAutoplayParsingTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/intelligence/IntelligenceTestSuite.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/memory/HybridRetrievalScorerTest.kt`
+- `android/app/src/test/java/in/diganta/aurabutler/memory/SemanticMemoryFeatureVectorTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/model/ButlerActionExpiryTest.kt`
+- `android/app/src/test/java/in/diganta/aurabutler/runtime/CoroutineSafetyTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/runtime/PromptInjectionGuardTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/runtime/ResponseQualityGateTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/runtime/SafeEndpointValidatorTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/runtime/SecretRedactorTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/runtime/StudentBudgetPolicyTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/voice/AdaptiveSpeechDetectorTest.kt`
+- `android/app/src/test/java/in/diganta/aurabutler/voice/AudioCaptureEffectsTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/voice/SpeechTextSanitizerTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/voice/TranscriptGuardTest.kt`
 - `android/app/src/test/java/in/diganta/aurabutler/voice/VoiceCommandClassifierTest.kt`
@@ -236,7 +242,7 @@ The test source tree currently contains 30 Kotlin test files. The current total 
 
 1. The Gradle app module is the source of truth for the installable version. The previous default-branch configuration declared `0.17.2-reliability-latency` (versionCode 27), while the README described older v0.14 features and the v0.18 notes documented several integration/device-verification tasks as pending. This PR increments the build to `0.17.3-voice-continuity` (versionCode 28).
 2. The voice service performs wake-word detection with sherpa-onnx, captures a command, uses the offline Whisper runtime, conditionally verifies the enrolled owner voice when the corresponding setting is enabled, and routes the transcript into the background command processor.
-3. During Android TTS, the current interruption trigger is still the lightweight wake-word spotter. The service stops the utterance after detecting the wake phrase, then plays a prompt tone and captures the new command. This does not yet provide arbitrary-phrase ASR interruption without saying the wake phrase.
+3. During Android TTS, `WakeWordService` monitors the playback session and can report either a wake-word event or sustained captured speech (`CapturedSpeech(samples)`) from the barge-in path. The recorder prefers `VOICE_COMMUNICATION`; optional Android Acoustic Echo Canceler and Noise Suppressor effects are attached where the platform supports them. With the Piper fallback, barge-in is disabled for that utterance because it cannot safely share the native wake/ASR runtime. Natural-speech capture is implemented in code, but recognition quality, self-echo rejection, and device-specific acoustic performance have not yet been accepted on physical hardware.
 4. `FastSystemSpeaker` tracks Android TTS range callbacks when available and calculates an estimated progress position as a fallback. Therefore a resume position is best-effort on devices/engines that do not report range callbacks.
 5. Owner voice verification is conditional on `ownerVoiceLockEnabled`. This PR does not silently force-enable biometric gating or lock out a device that has not enrolled; the project-wide security pass must make the enrollment, defaults, recovery, and sensitive-action policy explicit.
 6. The v0.18 implementation summary and architecture documents describe reasoning, planning, semantic memory, and proactive components, but also list UI wiring, end-to-end integration and device/performance validation as pending. Class existence alone is not proof that a path is active.
@@ -254,8 +260,8 @@ The test source tree currently contains 30 Kotlin test files. The current total 
 ## 6. Remaining voice work before the voice phase can be called complete
 
 - Verify true full-duplex capture on supported devices, including Android audio focus and microphone routing.
-- Evaluate Acoustic Echo Cancellation (AEC), noise suppression and self-audio rejection. Current wake-word/self-echo checks are not equivalent to a verified AEC pipeline.
-- Support interruption detection for natural authorized speech, not only a wake phrase; this requires carefully designed VAD/streaming-ASR scheduling and resource arbitration.
+- Verify that Android AEC and Noise Suppressor actually attach and remain enabled on target handsets; measure residual echo, speaker feedback and false triggers. Platform effect availability is now handled, but this is not proof of effective acoustic echo cancellation on every device.
+- Validate the sustained-speech barge-in path with arbitrary natural phrases, VAD thresholds, streaming-ASR resource arbitration, false positives, self-audio rejection and multilingual commands on supported physical devices. The capture path exists; hardware acceptance remains outstanding.
 - Add explicit utterance/session timeouts and a follow-up listening window after the response.
 - Improve semantic command completeness with intent-specific required slots, not only conservative phrase rules.
 - Add robust multilingual (English/Bengali/Hindi) voice-control intent handling.
@@ -281,6 +287,36 @@ Voice remains the first implementation priority. The later domain sequence is de
 | 10 | Device health, maintenance and UI | Permission transparency, resource pressure, diagnostics, accessible state feedback, settings consistency and recovery workflows |
 | 11 | Cross-system integration | Voice-to-tool end-to-end paths, concurrency/race tests, performance profiling, privacy/security regression and device acceptance |
 
-## 8. Completion policy
+## 8. Project-wide implementation continuation — 23 November 2026
+
+This section records the repository changes made after the original source inventory. It distinguishes implemented code from integrations that still require durable storage, production wiring, or device acceptance.
+
+### Implemented and source-reviewed in this continuation
+
+- **Provider selection and consent:** restored shared provider helpers. An explicitly selected Gemini or Groq provider is allowed; automatic public-provider fallback remains gated by the separate `allowPublicAiFallback` setting.
+- **Task planning:** cancellation is persisted as a `CANCELLED` plan/task state and rethrown to the caller; active/running/terminal task transitions are saved; an analysis task cannot report success when the provider returns no credible answer; in-memory plan-history mutations are synchronized.
+- **Memory retrieval:** replaced nondeterministic random vectors with bounded deterministic lexical feature hashing over tokens, bigrams and character trigrams; recall bounds query length, result count, scores and embedding dimensions; pattern/concept responses are parsed with bounds, confidence checks and references restricted to existing memory IDs.
+- **Shared HTTP:** added HTTPS/credential checks, request and response byte caps, bounded positive connect/read timeouts, standard HTTPS redirect-port checks, and a rule that an original bearer credential is not forwarded to a changed hostname.
+- **Cancellation consistency:** budget-manifest initialization and live weather/news lookups use cancellation-preserving wrappers; regression tests cover those paths.
+- **Regression coverage:** added tests for planner cancellation and empty analysis results, local feature-vector properties and concept-reference validation, HTTP body/timeout/URL constraints, and cancellation from live weather/news providers.
+
+### Integration gaps — not to be labelled complete
+
+- `ButlerViewModel` uses `ProductionButlerEngine` around `LocalButlerEngine`. The separate `EnhancedButlerEngine`/`IntelligenceCoordinator`/`SemanticMemory` path is not established as the live production conversation path; wiring it in requires a deliberate integration design and tests that preserve existing action approvals.
+- `SemanticMemory.MemoryStore` and planner `PlanStore` are process-local. The app's separate encrypted `PrivateMemoryStore` is not yet the persistence backend for semantic concepts, embeddings, plan checkpoints or plan history.
+- `LocalEmbeddingProvider` now produces deterministic lexical feature vectors, not neural semantic embeddings; its configured model path is not loaded. `RemoteEmbeddingProvider` remains a deprecated compatibility fallback and does not make a remote request. Real ONNX inference and any remote embedding adapter remain future implementation work.
+- `TaskPlanner` has safer execution state transitions, but task-type executors, durable checkpoint recovery, parallel scheduling and dependency-aware replanning are not complete.
+- `ProactiveEngine` currently generates and manages suggestions; it has no production-injected action executor. It must not autonomously claim or perform an action until that executor is integrated through `ActionSafetyPolicy`, explicit approvals, audit logging and idempotency controls.
+- `StudentBudgetConfig` defaults currently use zero/unlimited limits until a manifest supplies limits. Confirm that this is the intended deployment policy before enabling broad public-provider usage.
+- Physical Android acceptance remains outstanding for full-duplex capture, device AEC/NS, sustained arbitrary-phrase barge-in, Piper fallback behaviour, long-session resource cleanup and false-trigger/echo performance.
+
+### Current Git and verification boundary
+
+- Working branch: `feat/aura-domain-logic-upgrade`.
+- Pull request: `#2`, still deliberately a draft and unmerged.
+- Base `main`: `ed97788c9d74d2377190cd47eb7150606aef6270`; this continuation has not changed `main`.
+- The latest completed CI run before the parser-visibility fix failed at Kotlin compilation because the newly test-visible parser returned a private nested result type. The result type visibility has since been aligned; the fix still requires a fresh CI run. Do not treat unit tests, lint or APK assembly as passing until a run on the current head completes successfully.
+
+## 10. Completion policy
 
 A subsystem is complete only when its source-level design, active call paths, settings/defaults, failure cases, unit tests, integration tests and relevant device behaviour have been verified. Report separately what is implemented, what is tested in CI, what is verified on physical hardware, and what remains unavailable or unverified.
