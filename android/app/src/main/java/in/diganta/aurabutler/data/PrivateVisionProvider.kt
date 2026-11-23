@@ -8,6 +8,7 @@ import `in`.diganta.aurabutler.runtime.SafeEndpointValidator
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -121,9 +122,12 @@ class PrivateVisionProvider {
             throw IOException("The private vision server returned an unreadable response.")
         }
         StudentBudgetGuard.commit(budgetLease)
-        return ResponseQualityGate.forDisplay(content, settings.responseStyle)
+        ResponseQualityGate.forDisplay(content, settings.responseStyle)
             .takeIf(String::isNotBlank)
             ?: throw IOException("The private vision server returned an empty answer.")
+        } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
+            throw cancelled
         } catch (error: Exception) {
             StudentBudgetGuard.release(budgetLease)
             throw error
