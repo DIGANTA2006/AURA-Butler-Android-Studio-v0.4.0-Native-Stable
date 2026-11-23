@@ -491,7 +491,7 @@ class SemanticMemory(
         }
     }
 
-    private fun parsePatternResponse(response: String, entries: List<MemoryEntry>): PatternResult {
+    internal fun parsePatternResponse(response: String, entries: List<MemoryEntry>): PatternResult {
         val jsonStart = response.indexOf('{')
         val jsonEnd = response.lastIndexOf('}')
         if (jsonStart < 0 || jsonEnd <= jsonStart) {
