@@ -78,9 +78,28 @@ object SafeHttpClient {
         maxRedirects: Int = 10
     ): TextResponse {
         require(maxRedirects in 0..20)
+        require(connectTimeoutMs in 1..MAX_TIMEOUT_MS) {
+            "AURA requires a positive, bounded HTTP connect timeout."
+        }
+        require(readTimeoutMs in 1..MAX_TIMEOUT_MS) {
+            "AURA requires a positive, bounded HTTP read timeout."
+        }
+        require(maxResponseBytes in 1..MAX_ALLOWED_RESPONSE_BYTES) {
+            "AURA requires a bounded HTTP response size."
+        }
+
         val original = URI(endpoint)
+        val scheme = original.scheme?.lowercase().orEmpty()
         val originalHost = original.host?.lowercase().orEmpty()
+        require(scheme == "https") { "AURA blocked an unencrypted cloud endpoint." }
         require(originalHost.isNotBlank()) { "The endpoint does not include a valid host." }
+        require(original.userInfo.isNullOrBlank()) {
+            "AURA blocked credentials embedded in the endpoint URL."
+        }
+        val bodyBytes = body.toByteArray(StandardCharsets.UTF_8)
+        require(bodyBytes.size <= MAX_ALLOWED_REQUEST_BYTES) {
+            "The request body exceeded AURA's safety limit."
+        }
         val originalIsModal = originalHost.endsWith(".modal.run")
 
         var current = endpoint
@@ -88,6 +107,7 @@ object SafeHttpClient {
         var redirects = 0
 
         while (true) {
+            val currentHost = URI(current).host?.lowercase().orEmpty()
             val connection = open(current).apply {
                 requestMethod = method
                 connectTimeout = connectTimeoutMs
@@ -95,8 +115,13 @@ object SafeHttpClient {
                 doOutput = method == "POST"
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("User-Agent", userAgent)
-                bearerToken.trim().takeIf(String::isNotBlank)?.let {
-                    setRequestProperty("Authorization", "Bearer $it")
+                // A Modal 303 may move to a sibling result host. The hostname
+                // remains within the Modal trust policy, but the original
+                // endpoint's bearer credential must never follow it.
+                if (currentHost == originalHost) {
+                    bearerToken.trim().takeIf(String::isNotBlank)?.let {
+                        setRequestProperty("Authorization", "Bearer $it")
+                    }
                 }
                 if (method == "POST") {
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -106,7 +131,7 @@ object SafeHttpClient {
             try {
                 if (method == "POST") {
                     connection.outputStream.use { output ->
-                        output.write(body.toByteArray(StandardCharsets.UTF_8))
+                        output.write(bodyBytes)
                     }
                 }
 
@@ -151,6 +176,9 @@ object SafeHttpClient {
         val host = target.host?.lowercase().orEmpty()
         require(scheme == "https") { "AURA blocked an unencrypted cloud redirect." }
         require(host.isNotBlank()) { "AURA blocked a redirect without a host." }
+        require(target.port == -1 || target.port == 443) {
+            "AURA blocked a redirect to a non-standard HTTPS port."
+        }
         require(target.userInfo.isNullOrBlank()) { "AURA blocked credentials in a redirect URL." }
         require(
             host == originalHost ||
@@ -185,4 +213,6 @@ object SafeHttpClient {
 
     const val DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
     const val MAX_ALLOWED_RESPONSE_BYTES = 8 * 1024 * 1024
+    const val MAX_ALLOWED_REQUEST_BYTES = 8 * 1024 * 1024
+    private const val MAX_TIMEOUT_MS = 5 * 60 * 1_000
 }
