@@ -43,7 +43,7 @@ jobs:
             --output app/libs/sherpa-onnx-v1.13.4.aar
           expected="$(awk '$2 == "./android/app/libs/sherpa-onnx-v1.13.4.aar" { print $1 }' ../SHA256SUMS-SOURCE.txt)"
           test -n "$expected"
-          printf '%s  %s\\n' "$expected" "app/libs/sherpa-onnx-v1.13.4.aar" | sha256sum --check --strict
+          echo "$expected  app/libs/sherpa-onnx-v1.13.4.aar" | sha256sum --check --strict
 
       - name: Run unit tests
         working-directory: android
