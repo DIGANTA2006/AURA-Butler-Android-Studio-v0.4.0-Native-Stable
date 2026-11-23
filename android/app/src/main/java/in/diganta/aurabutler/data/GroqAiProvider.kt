@@ -28,9 +28,7 @@ class GroqAiProvider : AiProvider {
         if (key.isBlank()) return@withContext null
 
         val model = settings.aiModel.trim().ifBlank { MODEL_FAST }
-        val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(
-            settings.groqEndpoint.ifBlank { DEFAULT_ENDPOINT }
-        )
+        val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(DEFAULT_ENDPOINT)
 
         val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.TEXT, endpoint)
         if (!budgetLease.allowed) throw IOException(budgetLease.message)
@@ -59,9 +57,7 @@ class GroqAiProvider : AiProvider {
         if (key.isBlank()) return@withContext null
 
         val model = settings.aiModel.trim().ifBlank { MODEL_FAST }
-        val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(
-            settings.groqEndpoint.ifBlank { DEFAULT_ENDPOINT }
-        )
+        val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(DEFAULT_ENDPOINT)
 
         val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.TEXT, endpoint)
         if (!budgetLease.allowed) throw IOException(budgetLease.message)
