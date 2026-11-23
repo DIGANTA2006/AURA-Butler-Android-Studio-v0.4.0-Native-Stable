@@ -37,6 +37,28 @@ object SafeHttpClient {
     }
 
     /**
+     * Bounded JSON POST used by the Gemini and analyzer provider paths.
+     * Redirects remain subject to the same strict HTTPS host validation.
+     */
+    fun postJson(
+        endpoint: String,
+        body: String,
+        bearerToken: String = "",
+        userAgent: String,
+        connectTimeoutMs: Int,
+        readTimeoutMs: Int,
+        maxResponseBytes: Int = DEFAULT_MAX_RESPONSE_BYTES
+    ): TextResponse = postJsonFollowingTrustedRedirects(
+        endpoint = endpoint,
+        body = body,
+        bearerToken = bearerToken,
+        userAgent = userAgent,
+        connectTimeoutMs = connectTimeoutMs,
+        readTimeoutMs = readTimeoutMs,
+        maxResponseBytes = maxResponseBytes
+    )
+
+    /**
      * Sends JSON and follows Modal's long-running Web Function result redirects.
      *
      * Modal may answer a request that crosses its HTTP execution window with a

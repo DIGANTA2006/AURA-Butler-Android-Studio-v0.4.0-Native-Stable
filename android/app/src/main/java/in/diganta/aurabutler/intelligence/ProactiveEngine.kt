@@ -5,8 +5,11 @@ import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -50,9 +53,11 @@ class ProactiveEngine(
         AUTOMATION          // Suggest automation for repetitive task
     }
 
-    enum class Priority {
-        LOW(1), MEDIUM(2), HIGH(3), CRITICAL(4)
-        val weight: Int
+    enum class Priority(val weight: Int) {
+        LOW(1),
+        MEDIUM(2),
+        HIGH(3),
+        CRITICAL(4)
     }
 
     data class ProactiveAction(
@@ -75,7 +80,7 @@ class ProactiveEngine(
     data class SuggestionContext(
         val trigger: Trigger,
         val relatedMemoryIds: List<String> = emptyList(),
-        val timeRelevance: TimeRelevance = TimeRelevance.ANYTIME,
+        val timeRelevance: ProactiveEngine.TimeRelevance = ProactiveEngine.TimeRelevance.ANYTIME,
         val locationRelevance: String? = null
     )
 
@@ -107,16 +112,15 @@ class ProactiveEngine(
         val errorCount: Int = 0
     )
 
-    enum class AgentSchedule {
-        HOURLY,
-        DAILY,
-        WEEKLY,
-        ON_EVENT(String),  // Event name
-        CRON(String)       // Cron expression
+    sealed class AgentSchedule {
+        object HOURLY : AgentSchedule()
+        object DAILY : AgentSchedule()
+        object WEEKLY : AgentSchedule()
+        data class ON_EVENT(val eventName: String) : AgentSchedule()
+        data class CRON(val expression: String) : AgentSchedule()
     }
 
-    @FunctionalInterface
-    interface AgentTask {
+    fun interface AgentTask {
         suspend fun execute(context: AgentContext): AgentResult
     }
 
@@ -147,7 +151,11 @@ class ProactiveEngine(
 
     private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
     private val agents = ConcurrentHashMap<String, BackgroundAgent>()
-    private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+    @Volatile
+    private var scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+    @Volatile
+    private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var running = false
 
     init {
@@ -157,28 +165,36 @@ class ProactiveEngine(
     /**
      * Start the proactive engine - begins background agents and suggestion generation.
      */
+    @Synchronized
     fun start() {
         if (running) return
+        if (scheduler.isShutdown) {
+            scheduler = Executors.newScheduledThreadPool(2)
+        }
+        if (scope.coroutineContext[kotlinx.coroutines.Job]?.isCancelled != false) {
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
         running = true
-        
-        // Schedule periodic suggestion generation
+
+        // Scheduled callbacks only enqueue work; the coroutine scope owns
+        // suspend operations and is cancelled when the engine stops.
         scheduler.scheduleAtFixedRate({
-            generateProactiveSuggestions()
+            if (running) scope.launch { generateProactiveSuggestions() }
         }, 5, 15, TimeUnit.MINUTES)
-        
-        // Schedule background agents
+
         scheduleAgents()
-        
-        // Initial suggestion generation
-        generateProactiveSuggestions()
+        scope.launch { generateProactiveSuggestions() }
     }
 
     /**
-     * Stop the proactive engine.
+     * Stop scheduled and in-flight proactive work. A later start() creates
+     * fresh executors/scopes, so switching intelligence modes is reversible.
      */
+    @Synchronized
     fun stop() {
         running = false
-        scheduler.shutdown()
+        scheduler.shutdownNow()
+        scope.cancel()
     }
 
     /**
@@ -205,11 +221,12 @@ class ProactiveEngine(
      * Mark a suggestion as accepted and execute its action.
      */
     suspend fun acceptSuggestion(id: String, context: ConversationContext): Boolean {
-        return suggestions[id]?.let { suggestion ->
+        val suggestion = suggestions[id] ?: return false
+        val executed = executeAction(suggestion.action, context)
+        if (executed) {
             suggestions[id] = suggestion.copy(accepted = true)
-            executeAction(suggestion.action, context)
-            true
-        } ?: false
+        }
+        return executed
     }
 
     /**
@@ -217,7 +234,7 @@ class ProactiveEngine(
      */
     fun registerAgent(agent: BackgroundAgent) {
         agents[agent.id] = agent
-        if (running) scheduleAgent(agent)
+        if (running && agent.enabled) scheduleAgent(agent)
     }
 
     /**
@@ -233,9 +250,13 @@ class ProactiveEngine(
             name = "Daily Briefing",
             description = "Generates a morning summary of schedule, weather, and priorities",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
-            task = { ctx ->
-                val suggestions = generateDailyBriefing(ctx)
-                AgentResult(true, "Daily briefing generated", suggestions = suggestions)
+            enabled = false, // Disabled until its required data source is integrated
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Daily briefing is unavailable: calendar and weather data sources are not connected.",
+                    error = "Daily briefing integrations are not configured."
+                )
             }
         ))
 
@@ -244,9 +265,13 @@ class ProactiveEngine(
             name = "Memory Consolidation",
             description = "Consolidates memories, extracts patterns, applies forgetting curve",
             schedule = AgentSchedule.DAILY,
-            task = { ctx ->
-                // This would call semanticMemory.consolidate()
-                AgentResult(true, "Memory consolidation completed")
+            task = { _ ->
+                val result = semanticMemory.consolidate()
+                AgentResult(
+                    success = result.errors.isEmpty(),
+                    output = "Memory consolidation: merged ${result.mergedCount}, patterns ${result.patternsFound}, concepts ${result.conceptsCreated}, decayed ${result.decayedCount}.",
+                    error = result.errors.takeIf { it.isNotEmpty() }?.joinToString("; ")
+                )
             }
         ))
 
@@ -263,7 +288,7 @@ class ProactiveEngine(
                         title = "Low Battery",
                         description = "Battery at ${ctx.deviceState.batteryLevel}%. Consider enabling battery saver.",
                         action = ProactiveAction(
-                            type = ActionType.SHOW_NOTIFICATION,
+                            type = ProactiveEngine.ActionType.SHOW_NOTIFICATION,
                             payload = mapOf("message" to "Battery low: ${ctx.deviceState.batteryLevel}%"),
                             requiresConfirmation = false
                         ),
@@ -289,7 +314,7 @@ class ProactiveEngine(
                         title = "Low Storage",
                         description = "Only ${String.format("%.1f", ctx.deviceState.storageFreePercent)}% storage free. Consider clearing cache or unused apps.",
                         action = ProactiveAction(
-                            type = ActionType.OPEN_APP,
+                            type = ProactiveEngine.ActionType.OPEN_APP,
                             payload = mapOf("app" to "Settings > Storage"),
                             requiresConfirmation = true
                         ),
@@ -307,9 +332,13 @@ class ProactiveEngine(
             name = "Habit Learning",
             description = "Detects recurring patterns and suggests automations",
             schedule = AgentSchedule.WEEKLY,
-            task = { ctx ->
-                val suggestions = detectHabitPatterns(ctx)
-                AgentResult(true, "Habit analysis completed", suggestions = suggestions)
+            enabled = false, // Disabled until its required data source is integrated
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Habit analysis is unavailable until real usage signals are connected.",
+                    error = "No usage-history source is configured."
+                )
             }
         ))
 
@@ -318,9 +347,13 @@ class ProactiveEngine(
             name = "Research Follow-up",
             description = "Checks for updates on previous research topics",
             schedule = AgentSchedule.DAILY,
-            task = { ctx ->
-                val suggestions = checkResearchUpdates(ctx)
-                AgentResult(true, "Research follow-up completed", suggestions = suggestions)
+            enabled = false, // Disabled until its required data source is integrated
+            task = { _ ->
+                AgentResult(
+                    success = false,
+                    output = "Research follow-up is unavailable until prior research topics and a live update source are connected.",
+                    error = "Research update source is not configured."
+                )
             }
         ))
     }
@@ -346,19 +379,22 @@ class ProactiveEngine(
             AgentSchedule.HOURLY -> 3_600_000 // 1 hour
             AgentSchedule.DAILY -> 24 * 3_600_000 // 24 hours
             AgentSchedule.WEEKLY -> 7 * 24 * 3_600_000 // 1 week
-            AgentSchedule.ON_EVENT(_) -> 3_600_000 // Check hourly for events
-            AgentSchedule.CRON(_) -> 3_600_000 // Simplified - would parse cron
+            is AgentSchedule.ON_EVENT -> 3_600_000 // Check hourly for events
+            is AgentSchedule.CRON -> 3_600_000 // Cron parsing remains a separate scheduling enhancement
         }
     }
 
     private fun runAgent(agent: BackgroundAgent) {
-        val agentContext = buildAgentContext()
-        val updatedAgent = agent.copy(lastRun = System.currentTimeMillis(), runCount = agent.runCount + 1)
+        val updatedAgent = agent.copy(
+            lastRun = System.currentTimeMillis(),
+            runCount = agent.runCount + 1
+        )
         agents[agent.id] = updatedAgent
-        
-        // Run asynchronously
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+
+        // Keep all suspend work inside the engine-owned, cancellable scope.
+        scope.launch {
             try {
+                val agentContext = buildAgentContext()
                 val result = agent.task.execute(agentContext)
                 val successAgent = updatedAgent.copy(
                     successCount = updatedAgent.successCount + (if (result.success) 1 else 0),
@@ -366,38 +402,37 @@ class ProactiveEngine(
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = successAgent
-                
-                // Add generated suggestions
+
+                // Add generated suggestions only after successful agent execution.
                 result.suggestions.forEach { suggestions[it.id] = it }
-                
-                // Execute suggested actions if high confidence and auto-execute enabled
-                if (settings.proactiveAutoExecute) {
-                    result.actions.filter { it.requiresConfirmation == false && result.suggestions.any { s -> s.confidence > 0.8 } }
-                        .forEach { executeAction(it, ConversationContext.empty()) }
-                }
+
+                // The current engine has no action executor. Keep auto-execution
+                // disabled here; suggestions must never be reported as performed.
+                if (running && successAgent.enabled) scheduleAgent(successAgent)
             } catch (e: Exception) {
                 val errorAgent = updatedAgent.copy(
                     errorCount = updatedAgent.errorCount + 1,
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = errorAgent
+                if (running && errorAgent.enabled) scheduleAgent(errorAgent)
             }
         }
     }
 
-    private fun buildAgentContext(): AgentContext {
-        // In production, get real device state
+    private suspend fun buildAgentContext(): AgentContext {
+        val conversationContext = contextProvider.getCurrentContext()
+        val memoryResult = semanticMemory.recall(
+            query = "recent",
+            context = conversationContext,
+            options = SemanticMemory.RecallOptions(
+                maxResults = 20,
+                strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
+            )
+        )
         return AgentContext(
-            deviceState = DeviceState(
-                batteryLevel = 75,
-                isCharging = false,
-                networkType = "WIFI",
-                storageFreePercent = 35.0,
-                screenOn = true,
-                foregroundApp = "in.diganta.aurabutler"
-            ),
-            recentMemories = semanticMemory.recall("recent", ConversationContext.empty(), 
-                SemanticMemory.RecallOptions(maxResults = 20, strategy = SemanticMemory.RetrievalStrategy.TEMPORAL)).entries.map { it.entry },
+            deviceState = contextProvider.getDeviceState(),
+            recentMemories = memoryResult.entries.map { it.entry },
             activePlans = emptyList(),
             userPreferences = settings
         )
@@ -444,7 +479,7 @@ class ProactiveEngine(
                     title = "Good Morning",
                     description = "Would you like your daily briefing with weather, schedule, and priorities?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Show daily briefing?"),
                         requiresConfirmation = true
                     ),
@@ -452,7 +487,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.MORNING
+                        timeRelevance = ProactiveEngine.TimeRelevance.MORNING
                     )
                 )
             }
@@ -463,7 +498,7 @@ class ProactiveEngine(
                     title = "Lunch Break",
                     description = "Time for a break. Want me to set a timer or find nearby food?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Set lunch timer or find food?"),
                         requiresConfirmation = true
                     ),
@@ -471,7 +506,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.AFTERNOON
+                        timeRelevance = ProactiveEngine.TimeRelevance.AFTERNOON
                     )
                 )
             }
@@ -482,7 +517,7 @@ class ProactiveEngine(
                     title = "Evening Wrap-up",
                     description = "Review today's accomplishments and plan tomorrow?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Show evening summary?"),
                         requiresConfirmation = true
                     ),
@@ -490,7 +525,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.EVENING
+                        timeRelevance = ProactiveEngine.TimeRelevance.EVENING
                     )
                 )
             }
@@ -501,7 +536,7 @@ class ProactiveEngine(
                     title = "Night Mode",
                     description = "Enable do not disturb and set morning alarm?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Enable night mode?"),
                         requiresConfirmation = true
                     ),
@@ -509,7 +544,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.NIGHT
+                        timeRelevance = ProactiveEngine.TimeRelevance.NIGHT
                     )
                 )
             }
@@ -542,7 +577,7 @@ class ProactiveEngine(
                     title = "Recurring Topic: $topic",
                     description = "You've mentioned '$topic' $count times recently. Want to create a project or research note?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Create project for $topic?"),
                         requiresConfirmation = true
                     ),
@@ -569,7 +604,7 @@ class ProactiveEngine(
                 title = "Critical Battery",
                 description = "Battery at ${state.batteryLevel}%. Connect charger immediately.",
                 action = ProactiveAction(
-                    type = ActionType.SHOW_NOTIFICATION,
+                    type = ProactiveEngine.ActionType.SHOW_NOTIFICATION,
                     payload = mapOf("message" to "Critical battery: ${state.batteryLevel}%"),
                     requiresConfirmation = false
                 ),
@@ -585,7 +620,7 @@ class ProactiveEngine(
                 title = "Critical Storage",
                 description = "Only ${String.format("%.1f", state.storageFreePercent)}% free. Device may become unstable.",
                 action = ProactiveAction(
-                    type = ActionType.OPEN_APP,
+                    type = ProactiveEngine.ActionType.OPEN_APP,
                     payload = mapOf("app" to "Settings > Storage"),
                     requiresConfirmation = true
                 ),
@@ -599,52 +634,14 @@ class ProactiveEngine(
     }
 
     private fun generateDailyBriefing(ctx: AgentContext): List<ProactiveSuggestion> {
-        val suggestions = mutableListOf<ProactiveSuggestion>()
-        
-        suggestions += ProactiveSuggestion(
-            type = SuggestionType.PREPARATION,
-            title = "Daily Briefing Ready",
-            description = "Your morning summary is ready with weather, schedule, and top priorities.",
-            action = ProactiveAction(
-                type = ActionType.SHOW_INSIGHT,
-                payload = mapOf(
-                    "type" to "daily_briefing",
-                    "weather" to "Sunny, 22°C",
-                    "schedule" to "3 meetings, 2 tasks",
-                    "priorities" to "Project review, Team sync, Code review"
-                ),
-                requiresConfirmation = false
-            ),
-            confidence = 0.9,
-            priority = Priority.HIGH,
-            context = SuggestionContext(
-                trigger = Trigger.TIME_BASED,
-                timeRelevance = SuggestionContext.TimeRelevance.MORNING
-            )
-        )
-        
-        return suggestions
+        // Calendar and weather integrations are not connected; do not invent data.
+        return emptyList()
     }
 
+
     private fun detectHabitPatterns(ctx: AgentContext): List<ProactiveSuggestion> {
-        val suggestions = mutableListOf<ProactiveSuggestion>()
-        
-        // Simplified - would analyze actual usage patterns
-        suggestions += ProactiveSuggestion(
-            type = SuggestionType.AUTOMATION,
-            title = "Automation Opportunity",
-            description = "You often open YouTube and search for music after saying 'play'. Want a shortcut?",
-            action = ProactiveAction(
-                type = ActionType.ASK_QUESTION,
-                payload = mapOf("question" to "Create 'play music' shortcut?"),
-                requiresConfirmation = true
-            ),
-            confidence = 0.6,
-            priority = Priority.LOW,
-            context = SuggestionContext(trigger = Trigger.USER_HABIT)
-        )
-        
-        return suggestions
+        // No genuine usage-history source is connected yet.
+        return emptyList()
     }
 
     private fun checkResearchUpdates(ctx: AgentContext): List<ProactiveSuggestion> {
@@ -656,10 +653,10 @@ class ProactiveEngine(
         // Check time relevance
         val hour = java.time.LocalDateTime.now().hour
         when (suggestion.context.timeRelevance) {
-            SuggestionContext.TimeRelevance.MORNING -> if (hour !in 6..11) return false
-            SuggestionContext.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
-            SuggestionContext.TimeRelevance.EVENING -> if (hour !in 17..21) return false
-            SuggestionContext.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
+            ProactiveEngine.TimeRelevance.MORNING -> if (hour !in 6..11) return false
+            ProactiveEngine.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
+            ProactiveEngine.TimeRelevance.EVENING -> if (hour !in 17..21) return false
+            ProactiveEngine.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
             else -> {}
         }
         
@@ -667,23 +664,13 @@ class ProactiveEngine(
         return settings.proactiveSuggestionsEnabled
     }
 
-    private suspend fun executeAction(action: ProactiveAction, context: ConversationContext) {
-        // In production, integrate with action execution system
-        when (action.type) {
-            ProactiveAction.ActionType.SHOW_NOTIFICATION -> {
-                // Show notification
-            }
-            ProactiveAction.ActionType.ASK_QUESTION -> {
-                // Queue question for next interaction
-            }
-            ProactiveAction.ActionType.RUN_COMMAND -> {
-                // Execute command
-            }
-            ProactiveAction.ActionType.OPEN_APP -> {
-                // Open app
-            }
-            else -> {}
-        }
+    private suspend fun executeAction(
+        action: ProactiveAction,
+        context: ConversationContext
+    ): Boolean {
+        // Suggestions are metadata only until a reviewed action executor is
+        // injected. Never mark a suggestion accepted after a no-op.
+        return false
     }
 
     interface ContextProvider {

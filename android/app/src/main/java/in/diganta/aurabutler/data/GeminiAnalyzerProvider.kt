@@ -5,10 +5,10 @@ import `in`.diganta.aurabutler.runtime.ResponseQualityGate
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
 import `in`.diganta.aurabutler.runtime.AiWorkload
-import `in`.diganta.aurabutler.runtime.SafeEndpointValidator
 import java.io.IOException
-import java.net.URL
-import java.util.Locale
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -18,22 +18,23 @@ import org.json.JSONObject
 class GeminiAnalyzerProvider {
     suspend fun analyzeNotifications(
         items: List<NotificationItem>,
-        settings: ButlerSettings
+        settings: ButlerSettings,
+        channelLabel: String = "all apps"
     ): String = withContext(Dispatchers.IO) {
         check(isConfigured(settings)) {
-            "Enable analyzer and add your AURA cloud token in Settings."
+            "Enable cloud notification summaries and configure the Gemini API key in AURA Settings."
         }
-        val endpoint = SafeEndpointValidator.normalizeOrDefault(
-            settings.analyzerEndpoint,
-            DEFAULT_ENDPOINT
-        )
+        val endpoint = endpointFor(settings)
         val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.AUXILIARY, endpoint)
         if (!budgetLease.allowed) throw IOException(budgetLease.message)
 
         try {
-            val result = executeAnalysis(items, settings, endpoint)
+            val result = executeAnalysis(items, settings, endpoint, channelLabel)
             StudentBudgetGuard.commit(budgetLease)
-            return result
+            result
+        } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
+            throw cancelled
         } catch (error: Exception) {
             StudentBudgetGuard.release(budgetLease)
             throw error
@@ -43,31 +44,52 @@ class GeminiAnalyzerProvider {
     private fun executeAnalysis(
         items: List<NotificationItem>,
         settings: ButlerSettings,
-        endpoint: String
+        endpoint: String,
+        channelLabel: String
     ): String {
         val system = """
             ${AuraIdentity.systemIdentity()}
             You are AURA's notification analyzer. Summarize the owner's recent notifications
-            into a concise, actionable digest. Group by app. Identify anything urgent,
+            for $channelLabel into a concise, actionable digest. Group by app. Identify anything urgent,
             actionable, or time-sensitive. Ignore marketing, spam, and low-priority noise.
             ${ButlerSystemPrompt.languageInstruction(settings.speechLanguage)}
             Never reveal hidden reasoning. Output only the final digest.
         """.trimIndent()
 
-        val userContent = items.mapIndexed { index, item ->
-            "[$index] ${item.appName}: ${SecretRedactor.redact(item.content, 500)}"
+        val userContent = items.take(MAX_NOTIFICATION_ITEMS).mapIndexed { index, item ->
+            val app = SecretRedactor.redact(item.appName, 120)
+            val content = SecretRedactor.redact(item.content, 500)
+            "[$index] $app: $content"
         }.joinToString("\n")
 
+        // Gemini generateContent uses systemInstruction and parts[].text;
+        // role/content is the OpenAI-compatible shape and is not accepted here.
         val body = JSONObject()
-            .put("contents", JSONArray()
-                .put(JSONObject().put("role", "user").put("content", system))
-                .put(JSONObject().put("role", "user").put("content", userContent))
+            .put(
+                "systemInstruction",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(JSONObject().put("text", system))
+                )
             )
-            .put("generationConfig", JSONObject()
-                .put("temperature", 0.05)
-                .put("maxOutputTokens", 50_000)
-                .put("topP", 0.9)
-                .put("topK", 20)
+            .put(
+                "contents",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put(
+                            "parts",
+                            JSONArray().put(JSONObject().put("text", userContent))
+                        )
+                )
+            )
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("temperature", 0.05)
+                    .put("maxOutputTokens", 8_192)
+                    .put("topP", 0.9)
+                    .put("topK", 20)
             )
             .put("safetySettings", safetySettings())
 
@@ -121,20 +143,20 @@ class GeminiAnalyzerProvider {
         prompt: String,
         settings: ButlerSettings
     ): String = withContext(Dispatchers.IO) {
-        check(isConfigured(settings)) {
-            "Enable screen analysis and add your AURA cloud token in Settings."
+        check(isScreenAnalysisConfigured(settings)) {
+            "Enable screen analysis and configure the Gemini API key in AURA Settings."
         }
-        val endpoint = SafeEndpointValidator.normalizeOrDefault(
-            settings.analyzerEndpoint,
-            DEFAULT_ENDPOINT
-        )
+        val endpoint = endpointFor(settings)
         val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.VISION, endpoint)
         if (!budgetLease.allowed) throw IOException(budgetLease.message)
 
         try {
             val result = executeScreenAnalysis(imageBytes, mimeType, prompt, settings, endpoint)
             StudentBudgetGuard.commit(budgetLease)
-            return result
+            result
+        } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
+            throw cancelled
         } catch (error: Exception) {
             StudentBudgetGuard.release(budgetLease)
             throw error
@@ -172,32 +194,40 @@ class GeminiAnalyzerProvider {
             1_500
         )
 
+        val imageData = imageUrl.substringAfter(";base64,", missingDelimiterValue = "")
+        require(imageData.isNotBlank()) { "The prepared screenshot could not be encoded." }
         val body = JSONObject()
-            .put("contents", JSONArray()
-                .put(JSONObject().put("role", "user").put("content", system))
-                .put(
+            .put(
+                "systemInstruction",
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system)))
+            )
+            .put(
+                "contents",
+                JSONArray().put(
                     JSONObject()
                         .put("role", "user")
                         .put(
-                            "content",
+                            "parts",
                             JSONArray()
-                                .put(JSONObject().put("type", "text").put("text", userPrompt))
+                                .put(JSONObject().put("text", userPrompt))
                                 .put(
-                                    JSONObject()
-                                        .put("type", "image_url")
-                                        .put(
-                                            "image_url",
-                                            JSONObject().put("url", imageUrl)
-                                        )
+                                    JSONObject().put(
+                                        "inline_data",
+                                        JSONObject()
+                                            .put("mime_type", normalizeMimeType(mimeType))
+                                            .put("data", imageData)
+                                    )
                                 )
                         )
                 )
             )
-            .put("generationConfig", JSONObject()
-                .put("temperature", 0.0)
-                .put("maxOutputTokens", 50_000)
-                .put("topP", 0.9)
-                .put("topK", 20)
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("temperature", 0.0)
+                    .put("maxOutputTokens", 8_192)
+                    .put("topP", 0.9)
+                    .put("topK", 20)
             )
             .put("safetySettings", safetySettings())
 
@@ -258,10 +288,22 @@ class GeminiAnalyzerProvider {
     }
 
     fun isConfigured(settings: ButlerSettings): Boolean =
-        settings.analyzerEnabled &&
-        settings.cloudAnalyzerSummaries &&
-        settings.analyzerApiKey.isNotBlank() &&
-        settings.analyzerEndpoint.isNotBlank()
+        settings.aiEnabled &&
+            settings.analyzerEnabled &&
+            settings.cloudAnalyzerSummaries &&
+            settings.geminiApiKey.isNotBlank()
+
+    fun isScreenAnalysisConfigured(settings: ButlerSettings): Boolean =
+        settings.aiEnabled &&
+            settings.analyzerEnabled &&
+            settings.screenAnalysisEnabled &&
+            settings.geminiApiKey.isNotBlank()
+
+    private fun endpointFor(settings: ButlerSettings): String {
+        val model = settings.geminiModel.trim().ifBlank { GeminiAiProvider.MODEL_FAST }
+        val encodedKey = URLEncoder.encode(settings.geminiApiKey.trim(), StandardCharsets.UTF_8.name())
+        return "$ENDPOINT_PREFIX$model:generateContent?key=$encodedKey"
+    }
 
     data class NotificationItem(
         val appName: String,
@@ -271,8 +313,8 @@ class GeminiAnalyzerProvider {
     )
 
     companion object {
-        const val DEFAULT_ENDPOINT =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
+        private const val ENDPOINT_PREFIX =
+            "https://generativelanguage.googleapis.com/v1beta/models/"
         private const val CONNECT_TIMEOUT_MS = 12_000
         private const val READ_TIMEOUT_MS = 42_000
         private const val MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024

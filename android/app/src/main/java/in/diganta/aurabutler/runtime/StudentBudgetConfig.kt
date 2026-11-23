@@ -1,8 +1,8 @@
 package `in`.diganta.aurabutler.runtime
 
 import android.content.Context
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Student-safe external AI request limits. Zero means unlimited. */
 object StudentBudgetConfig {
@@ -17,6 +17,16 @@ object StudentBudgetConfig {
     @Volatile private var cachedResearchLimit: Int = DEFAULT_DAILY_RESEARCH_LIMIT
     @Volatile private var cachedAuxiliaryLimit: Int = DEFAULT_DAILY_AUXILIARY_LIMIT
     @Volatile private var initialized = false
+    private val initializationMutex = Mutex()
+
+    /** Applies a manifest atomically after its asynchronous fetch has completed. */
+    private fun applyManifest(manifest: EndpointManifest) {
+        cachedTextLimit = manifest.budgets.dailyText.coerceAtLeast(0)
+        cachedVisionLimit = manifest.budgets.dailyVision.coerceAtLeast(0)
+        cachedResearchLimit = manifest.budgets.dailyResearch.coerceAtLeast(0)
+        cachedAuxiliaryLimit = manifest.budgets.dailyAuxiliary.coerceAtLeast(0)
+        initialized = true
+    }
 
     /** Current daily text request limit (0 = unlimited). */
     val DAILY_TEXT_LIMIT: Int
@@ -41,15 +51,10 @@ object StudentBudgetConfig {
      */
     suspend fun initialize(context: Context) {
         if (initialized) return
-        synchronized(this) {
-            if (initialized) return
-            RemoteConfig.fetchOrCached(context).let { manifest ->
-                cachedTextLimit = manifest.budgets.dailyText
-                cachedVisionLimit = manifest.budgets.dailyVision
-                cachedResearchLimit = manifest.budgets.dailyResearch
-                cachedAuxiliaryLimit = manifest.budgets.dailyAuxiliary
-                initialized = true
-            }
+        initializationMutex.withLock {
+            if (initialized) return@withLock
+            val manifest = RemoteConfig.fetchOrCached(context.applicationContext)
+            applyManifest(manifest)
         }
     }
 
@@ -58,8 +63,11 @@ object StudentBudgetConfig {
      * Use RemoteConfig.invalidateCache() first if you want to force a network fetch.
      */
     suspend fun refresh(context: Context) {
-        initialized = false
-        initialize(context)
+        initializationMutex.withLock {
+            initialized = false
+            val manifest = RemoteConfig.fetchOrCached(context.applicationContext)
+            applyManifest(manifest)
+        }
     }
 
     /** Returns true if budgets have been loaded from remote manifest (not just fallbacks). */

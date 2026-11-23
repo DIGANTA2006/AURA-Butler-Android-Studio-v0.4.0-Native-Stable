@@ -2,15 +2,18 @@ package `in`.diganta.aurabutler.planning
 
 import `in`.diganta.aurabutler.intelligence.ReasoningEngine
 import `in`.diganta.aurabutler.model.ConversationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Advanced planning system with persistent task graphs, checkpoints, and autonomous execution.
- * Supports multi-step plans with dependencies, rollback, and progress tracking.
+ * Multi-step planning with dependency validation, checkpoints, and progress tracking.
+ * Execution is limited to the task handlers with real implementations; unsupported
+ * executor types fail explicitly rather than reporting simulated success.
  */
 class TaskPlanner(
     private val reasoningEngine: ReasoningEngine,
@@ -137,6 +140,7 @@ class TaskPlanner(
     suspend fun executePlan(
         planId: String,
         context: ConversationContext,
+        options: PlanOptions = PlanOptions(),
         onProgress: (Plan, TaskNode, TaskStatus) -> Unit = { _, _, _ -> }
     ): ExecutionResult = withContext(Dispatchers.IO) {
         val plan = planStore.get(planId) ?: throw IllegalArgumentException("Plan not found: $planId")
@@ -151,7 +155,7 @@ class TaskPlanner(
 
         try {
             // Build dependency graph
-            val taskMap = mutablePlan.tasks.associateBy { it.id }
+            val taskMap = mutablePlan.tasks.associateBy { it.id }.toMutableMap()
             val dependencyGraph = buildDependencyGraph(mutablePlan.tasks)
             val executionOrder = topologicalSort(dependencyGraph)
 
@@ -272,7 +276,7 @@ class TaskPlanner(
                 lastError = result.error
                 // Brief delay before retry
                 if (attempt < task.maxRetries) {
-                    Thread.sleep(1000 * (attempt + 1))
+                    delay(1_000L * (attempt + 1))
                 }
             }
         }
@@ -287,7 +291,7 @@ class TaskPlanner(
         )
     }
 
-    private fun executeSingleTask(task: TaskNode, context: ConversationContext): SingleTaskResult {
+    private suspend fun executeSingleTask(task: TaskNode, context: ConversationContext): SingleTaskResult {
         return try {
             when (task.type) {
                 TaskType.RESEARCH -> executeResearch(task, context)
@@ -298,6 +302,8 @@ class TaskPlanner(
                 TaskType.COMMUNICATION -> executeCommunication(task, context)
                 TaskType.DECISION -> executeDecision(task, context)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             SingleTaskResult(success = false, output = null, error = e.message)
         }
@@ -311,14 +317,14 @@ class TaskPlanner(
             return SingleTaskResult(false, null, "Tool not found: $tool")
         }
 
-        // In production, actually call the tool
-        val query = task.toolArguments["query"] as? String ?: task.description
-        val result = "Research completed for: $query. [Simulated result - would call $tool in production]"
-        
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "The '$tool' tool is registered but has no live executor. No research was performed."
+        )
     }
 
-    private fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
+    private suspend fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
         // Use reasoning engine for analysis
         val reasoningResult = reasoningEngine.reason(
             task = "Analyze: ${task.description}\nContext: ${task.toolArguments}",
@@ -326,7 +332,7 @@ class TaskPlanner(
             options = ReasoningEngine.ReasoningOptions(enableToolUse = false)
         )
         
-        SingleTaskResult(true, reasoningResult.finalAnswer, null)
+        return SingleTaskResult(true, reasoningResult.finalAnswer, null)
     }
 
     private fun executeAction(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -341,43 +347,43 @@ class TaskPlanner(
             return SingleTaskResult(false, null, "Action requires user confirmation: ${task.description}")
         }
 
-        val result = "Action executed: ${task.description} using $tool. [Simulated - would execute in production]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No action executor is connected for '$tool'. No device or external action was performed."
+        )
     }
 
     private fun executeCreation(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val content = task.toolArguments["content"] as? String 
-            ?: "Generated content for: ${task.description}"
-        val filePath = task.toolArguments["path"] as? String
-        
-        val result = "Created: ${filePath ?: "content"} (${content.length} chars). [Simulated]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No file/content creation executor is connected. Nothing was written."
+        )
     }
 
     private fun executeVerification(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val target = task.toolArguments["target"] as? String ?: "previous task output"
-        val criteria = task.toolArguments["criteria"] as? String ?: "correctness and completeness"
-        
-        val result = "Verified: $target against criteria: $criteria. [Simulated verification passed]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No verification engine is connected. The task has not been verified."
+        )
     }
 
     private fun executeCommunication(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val message = task.toolArguments["message"] as? String ?: task.description
-        val channel = task.toolArguments["channel"] as? String ?: "notification"
-        
-        val result = "Sent $channel: $message"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No communication-channel executor is connected. No message was sent."
+        )
     }
 
     private fun executeDecision(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val condition = task.toolArguments["condition"] as? String ?: "true"
-        val trueBranch = task.toolArguments["trueTask"] as? String
-        val falseBranch = task.toolArguments["falseTask"] as? String
-        
-        // In production, evaluate condition dynamically
-        val result = "Decision point: $condition -> would branch to ${if (condition == "true") trueBranch else falseBranch}"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No condition evaluator is connected. No decision branch was executed."
+        )
     }
 
     private fun parseTasksFromReasoning(trace: List<ReasoningEngine.ReasoningStep>, finalAnswer: String): List<TaskNode> {
@@ -389,8 +395,10 @@ class TaskPlanner(
         val planStep = trace.firstOrNull { it.type == ReasoningEngine.StepType.PLANNING }
         if (planStep != null) {
             val lines = planStep.content.lines()
-                .filter { it.trim().matches(Regex("^\\d+\\.")) }
-                .map { it.trim().substringAfter(".").trim() }
+                .map { it.trim() }
+                .filter { Regex("^\\d+\\.\\s+.+$").matches(it) }
+                .map { it.replaceFirst(Regex("^\\d+\\.\\s*"), "").trim() }
+                .filter(String::isNotBlank)
             
             var previousId: String? = null
             for ((index, line) in lines.withIndex()) {
@@ -420,6 +428,9 @@ class TaskPlanner(
         }
     }
 
+    private fun String.containsAny(vararg values: String): Boolean =
+        values.any { contains(it, ignoreCase = true) }
+
     private fun inferTaskType(description: String): TaskType {
         val lower = description.lowercase()
         return when {
@@ -445,9 +456,16 @@ class TaskPlanner(
     }
 
     private fun buildDependencyGraph(tasks: List<TaskNode>): Map<String, Set<String>> {
-        val graph = mutableMapOf<String, MutableSet<String>>()
+        val taskIds = tasks.map(TaskNode::id).toSet()
+        require(taskIds.size == tasks.size) { "The plan contains duplicate task IDs." }
+
+        val graph = linkedMapOf<String, Set<String>>()
         for (task in tasks) {
-            graph[task.id] = task.dependencies.toMutableSet()
+            val missing = task.dependencies.filterNot(taskIds::contains)
+            require(missing.isEmpty()) {
+                "Task '${task.title}' depends on unknown task IDs: ${missing.joinToString()}."
+            }
+            graph[task.id] = task.dependencies.toSet()
         }
         return graph
     }
@@ -484,7 +502,10 @@ class TaskPlanner(
             }
         }
         
-        return if (result.size == graph.size) result else graph.keys.toList()
+        require(result.size == graph.size) {
+            "The plan dependency graph contains a cycle. No tasks were executed."
+        }
+        return result
     }
 
     private fun dependenciesMet(task: TaskNode, taskMap: Map<String, TaskNode>): Boolean {
@@ -533,7 +554,8 @@ class TaskPlanner(
 }
 
 /**
- * Persistent plan storage with versioning and recovery.
+ * In-memory plan repository with bounded version history.
+ * Durable persistence and process-death recovery are not implemented yet.
  */
 class PlanStore {
     private val plans = ConcurrentHashMap<String, TaskPlanner.Plan>()

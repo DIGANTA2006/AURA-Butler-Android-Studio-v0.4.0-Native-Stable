@@ -4,11 +4,13 @@ import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
 
 /**
  * Advanced semantic memory system with embeddings-based retrieval, consolidation, and forgetting.
@@ -284,11 +286,19 @@ class SemanticMemory(
         // Try to parse JSON from AI response
         try {
             val json = org.json.JSONObject(response)
+            val related = json.optJSONArray("relatedEntities")
+            val temporal = json.optJSONArray("temporalTags")
             return MemoryMetadata(
-                relatedEntities = json.getJSONArray("relatedEntities").toList().map { it as String },
-                temporalTags = json.getJSONArray("temporalTags").toList().map { it as String },
-                sentiment = json.getDouble("sentiment"),
-                confidence = json.getDouble("confidence")
+                relatedEntities = related?.let { array ->
+                    List(array.length()) { index -> array.optString(index) }
+                        .filter(String::isNotBlank)
+                } ?: emptyList(),
+                temporalTags = temporal?.let { array ->
+                    List(array.length()) { index -> array.optString(index) }
+                        .filter(String::isNotBlank)
+                } ?: emptyList(),
+                sentiment = json.optDouble("sentiment", 0.0).coerceIn(-1.0, 1.0),
+                confidence = json.optDouble("confidence", 0.0).coerceIn(0.0, 1.0)
             )
         } catch (e: Exception) {
             return MemoryMetadata()
@@ -490,12 +500,23 @@ class SemanticMemory(
         return decayed
     }
 
+    @Volatile
+    private var lastScheduledConsolidationCount = 0
+
+    private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private fun maybeTriggerConsolidation() {
-        // Run consolidation periodically (e.g., every 50 new memories)
+        // Consolidation is suspend work; run it in an owned background scope,
+        // and schedule at most once for each 50-record boundary.
         val count = memoryStore.getAll().size
-        if (count % 50 == 0) {
-            // Trigger async consolidation
-            consolidationExecutor.execute { consolidate() }
+        if (count == 0 || count % 50 != 0 || count == lastScheduledConsolidationCount) return
+
+        synchronized(this) {
+            if (count == lastScheduledConsolidationCount) return
+            lastScheduledConsolidationCount = count
+            maintenanceScope.launch {
+                runCatching { consolidate() }
+            }
         }
     }
 
@@ -504,8 +525,6 @@ class SemanticMemory(
             it.content.length + it.label.length + (it.embedding?.size ?: 0) * 4 + 200 
         }.toLong()
     }
-
-    private val consolidationExecutor = Executors.newSingleThreadExecutor()
 
     data class RecallOptions(
         val maxResults: Int = 10,
@@ -550,7 +569,8 @@ interface EmbeddingProvider {
 }
 
 /**
- * Local embedding provider using a small ONNX model (e.g., all-MiniLM-L6-v2 quantized).
+ * Temporary deterministic hash embedding used as a compile-safe fallback.
+ * This is not ONNX inference and does not provide semantic-quality embeddings.
  */
 class LocalEmbeddingProvider(
     private val modelPath: String
@@ -558,23 +578,23 @@ class LocalEmbeddingProvider(
     override val dimension: Int = 384  // all-MiniLM-L6-v2 dimension
     
     override fun embed(text: String): FloatArray {
-        // Placeholder - in production, run ONNX inference
-        // For now, return a deterministic hash-based pseudo-embedding
+        // The configured modelPath is not loaded by this implementation.
+        // Return a deterministic placeholder vector so callers can be tested,
+        // but do not treat it as semantic model inference.
         return generatePseudoEmbedding(text)
     }
     
-    private fun generatePseudoEmbedding(text: String): FloatArray {
+    internal fun generatePseudoEmbedding(text: String): FloatArray {
         val embedding = FloatArray(dimension)
-        val hash = text.hashCode()
-        val random = java.util.Random(hash.toLong())
+        val random = java.util.Random(text.hashCode().toLong())
         for (i in embedding.indices) {
-            embedding[i] = (random.nextGaussian() * 0.1f).coerceIn(-1f, 1f)
+            embedding[i] = (random.nextGaussian().toFloat() * 0.1f).coerceIn(-1f, 1f)
         }
-        // Normalize
-        val norm = Math.sqrt(embedding.map { it.toDouble() * it }.sum())
-        if (norm > 0) {
+        // Normalize in double precision, then store unit-length Float values.
+        val norm = kotlin.math.sqrt(embedding.sumOf { value -> value.toDouble() * value.toDouble() })
+        if (norm > 1e-12) {
             for (i in embedding.indices) {
-                embedding[i] = (embedding[i] / norm).toFloat()
+                embedding[i] = (embedding[i].toDouble() / norm).toFloat()
             }
         }
         return embedding
@@ -598,7 +618,9 @@ class RemoteEmbeddingProvider(
 }
 
 /**
- * Persistent memory storage.
+ * In-memory semantic-memory index.
+ * Entries are lost when the process exits; encrypted persistent integration
+ * with PrivateMemoryStore remains a separate implementation task.
  */
 class MemoryStore {
     private val memories = ConcurrentHashMap<String, SemanticMemory.MemoryEntry>()

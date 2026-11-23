@@ -81,6 +81,7 @@ class NotificationAnalyzer(
         val cloudText = if (
             detailed &&
             !locked &&
+            settings.analyzerEnabled &&
             settings.cloudAnalyzerSummaries &&
             settings.aiEnabled &&
             settings.geminiApiKey.isNotBlank() &&
@@ -90,8 +91,21 @@ class NotificationAnalyzer(
             )
         ) {
             runCatching {
-                gemini.summarizeNotifications(
-                    items = items,
+                val cloudItems = items.map { item ->
+                    GeminiAnalyzerProvider.NotificationItem(
+                        appName = item.appName,
+                        content = buildString {
+                            item.title.takeIf(String::isNotBlank)?.let { append("Title: ").append(it).append('\n') }
+                            item.sender.takeIf(String::isNotBlank)?.let { append("Sender: ").append(it).append('\n') }
+                            item.subText.takeIf(String::isNotBlank)?.let { append("Conversation: ").append(it).append('\n') }
+                            append("Message: ").append(item.text)
+                        }.take(2_500),
+                        channel = item.channel.name.lowercase(Locale.ROOT),
+                        timestamp = item.postedAtEpochMs
+                    )
+                }
+                gemini.analyzeNotifications(
+                    items = cloudItems,
                     settings = settings,
                     channelLabel = channel?.name?.lowercase(Locale.ROOT) ?: "all apps"
                 )

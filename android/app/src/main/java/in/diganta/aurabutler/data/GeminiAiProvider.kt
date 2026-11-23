@@ -353,6 +353,25 @@ class GeminiAiProvider : AiProvider {
         }
     }
 
+    /**
+     * Grounded current-news path used by the news command and analyzer.
+     * The limit is bounded before being included in the search instruction.
+     */
+    suspend fun detailedNews(
+        topic: String?,
+        settings: ButlerSettings,
+        limit: Int = 5
+    ): ResearchResult {
+        val safeLimit = limit.coerceIn(1, 10)
+        val scope = topic?.trim()?.take(120)?.takeIf(String::isNotBlank)
+            ?.let { " about $it" }.orEmpty()
+        val query = "Find up to $safeLimit of the latest relevant news$scope. " +
+            "Prioritize current, reliable reporting. For each item explain what happened, " +
+            "why it matters, publication/event dates when available, and cite source links. " +
+            "Distinguish confirmed facts from uncertainty."
+        return groundedResearch(query, settings, detailed = true)
+    }
+
     data class ResearchResult(
         val answer: String,
         val provider: String

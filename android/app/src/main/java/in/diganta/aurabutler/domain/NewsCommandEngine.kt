@@ -1,7 +1,7 @@
 package `in`.diganta.aurabutler.domain
 
 import `in`.diganta.aurabutler.data.FreeNewsProvider
-import `in`.diganta.aurabutler.data.GeminiAnalyzerProvider
+import `in`.diganta.aurabutler.data.GeminiAiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
 import `in`.diganta.aurabutler.data.NewsStory
 import `in`.diganta.aurabutler.data.OpenAiCompatibleProvider
@@ -27,7 +27,7 @@ class NewsCommandEngine(
 ) {
     private val provider = FreeNewsProvider()
     private val privateQwen = OpenAiCompatibleProvider()
-    private val gemini = GeminiAnalyzerProvider()
+    private val gemini = GeminiAiProvider()
 
     suspend fun handle(
         message: String,

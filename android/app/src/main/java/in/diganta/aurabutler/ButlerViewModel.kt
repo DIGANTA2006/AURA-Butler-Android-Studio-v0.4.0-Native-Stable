@@ -697,7 +697,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 val prepared = load()
                 var privateError: Exception? = null
 
-                if (PrivateVisionProvider.isConfigured(settings)) {
+                if (privateVisionAnalyzer.isConfigured(settings)) {
                     try {
                         val answer = privateVisionAnalyzer.analyzeImage(
                             imageBytes = prepared.bytes,
@@ -719,7 +719,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         HybridAiProvider.PROVIDER_GEMINI
                     )
                 ) {
-                    val answer = geminiAnalyzer.analyzeImage(
+                    val answer = geminiAnalyzer.analyzeScreen(
                         imageBytes = prepared.bytes,
                         mimeType = prepared.mimeType,
                         prompt = prompt,

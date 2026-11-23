@@ -51,9 +51,12 @@ class SecureStore(context: Context) {
         TemporalMemoryStore(appContext)
     }
 
-    /** Lazily loaded remote manifest (network → cache → hardcoded defaults). */
+    /**
+     * Synchronous, non-network manifest snapshot. AuraApplication refreshes the
+     * remote manifest asynchronously; settings reads never block on network I/O.
+     */
     private val remoteManifest by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        RemoteConfig.fetchOrCached(appContext)
+        RemoteConfig.getCachedOrDefault(appContext)
     }
 
     fun loadSettings(): ButlerSettings {
@@ -242,6 +245,7 @@ class SecureStore(context: Context) {
             // Intelligence settings (v0.18+)
             intelligenceMode = IntelligenceMode.fromWireName(
                 preferences.getString(KEY_INTELLIGENCE_MODE, defaults.intelligenceMode.wireName)
+                    ?: defaults.intelligenceMode.wireName
             ),
             proactiveSuggestionsEnabled = preferences.getBoolean(
                 KEY_PROACTIVE_SUGGESTIONS_ENABLED,
