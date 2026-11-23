@@ -56,20 +56,40 @@ class GeminiAnalyzerProvider {
             Never reveal hidden reasoning. Output only the final digest.
         """.trimIndent()
 
-        val userContent = items.mapIndexed { index, item ->
-            "[$index] ${item.appName}: ${SecretRedactor.redact(item.content, 500)}"
+        val userContent = items.take(MAX_NOTIFICATION_ITEMS).mapIndexed { index, item ->
+            val app = SecretRedactor.redact(item.appName, 120)
+            val content = SecretRedactor.redact(item.content, 500)
+            "[$index] $app: $content"
         }.joinToString("\n")
 
+        // Gemini generateContent uses systemInstruction and parts[].text;
+        // role/content is the OpenAI-compatible shape and is not accepted here.
         val body = JSONObject()
-            .put("contents", JSONArray()
-                .put(JSONObject().put("role", "user").put("content", system))
-                .put(JSONObject().put("role", "user").put("content", userContent))
+            .put(
+                "systemInstruction",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(JSONObject().put("text", system))
+                )
             )
-            .put("generationConfig", JSONObject()
-                .put("temperature", 0.05)
-                .put("maxOutputTokens", 50_000)
-                .put("topP", 0.9)
-                .put("topK", 20)
+            .put(
+                "contents",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put(
+                            "parts",
+                            JSONArray().put(JSONObject().put("text", userContent))
+                        )
+                )
+            )
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("temperature", 0.05)
+                    .put("maxOutputTokens", 8_192)
+                    .put("topP", 0.9)
+                    .put("topK", 20)
             )
             .put("safetySettings", safetySettings())
 
