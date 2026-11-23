@@ -1,4 +1,4 @@
-# AURA Butler 0.14 Agent + RAG + Streaming for Android
+# AURA Butler 0.17.3 Voice Continuity + Agent + RAG for Android
 
 AURA is Diganta's private Android personal assistant for arm64 phones such as
 Vivo 1901. Version 0.14 keeps the stable offline voice foundation and adds a cost-bounded expert-router, streamed private Qwen replies, explicit document attachment/RAG, and a safer delayed screen-capture workflow.
