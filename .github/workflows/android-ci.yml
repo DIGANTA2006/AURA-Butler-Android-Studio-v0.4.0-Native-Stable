@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+# Keep only the newest PR validation active to avoid wasting Actions minutes.
+concurrency:
+  group: android-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
