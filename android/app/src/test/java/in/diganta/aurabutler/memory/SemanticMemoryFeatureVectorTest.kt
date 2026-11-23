@@ -110,10 +110,10 @@ class SemanticMemoryFeatureVectorTest {
                 it.label == "Concept: Execution safety"
         }
 
-        assertEquals(1, result.patternsFound)
-        assertEquals(1, result.conceptsCreated)
-        assertTrue(concept != null)
-        assertTrue(concept!!.metadata.relatedEntities.containsAll(listOf("Coroutine cancellation", "Plan recovery")))
+        assertEquals("No valid pattern was parsed; check the provider prompt and response.", 1, result.patternsFound)
+        assertEquals("No concept passed validation or was stored.", 1, result.conceptsCreated)
+        assertTrue("Expected a stored linked concept.", concept != null)
+        assertTrue("Stored concept does not contain the expected source-memory labels.", concept!!.metadata.relatedEntities.containsAll(listOf("Coroutine cancellation", "Plan recovery")))
     }
 
     private fun cosine(a: FloatArray, b: FloatArray): Double {
