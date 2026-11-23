@@ -421,13 +421,16 @@ class ReasoningEngine(
     private fun buildReasoningPrompt(task: String, plan: String, context: ConversationContext): String {
         return """
             Task: $task
-            
+
             Approach: $plan
-            
-            Provide step-by-step reasoning. Be explicit about assumptions.
-            If uncertain, state what additional information would help.
+
+            Provide a concise answer with explicit assumptions and uncertainty.
+            Do not expose private hidden reasoning. Summarize the method and verification evidence.
         """.trimIndent()
     }
+
+    private fun String.containsAny(vararg values: String): Boolean =
+        values.any { contains(it, ignoreCase = true) }
 
     data class ReasoningOptions(
         val enableToolUse: Boolean = true,
@@ -435,82 +438,7 @@ class ReasoningEngine(
         val maxSteps: Int = 20,
         val requireVerification: Boolean = true
     )
-}
 
-/**
- * Registry of available tools for reasoning engine.
- */
-class ToolRegistry {
-    private val tools = mutableMapOf<String, ToolDefinition>()
-    
-    init {
-        registerDefaultTools()
-    }
-    
-    fun register(tool: ToolDefinition) {
-        tools[tool.name] = tool
-    }
-    
-    fun availableTools(): List<String> = tools.keys.toList()
-    
-    fun getTool(name: String): ToolDefinition? = tools[name]
-    
-    fun findToolForTask(task: String): ToolDefinition? {
-        val lower = task.lowercase()
-        return tools.values.firstOrNull { tool ->
-            tool.keywords.any { lower.contains(it) }
-        }
-    }
-    
-    fun requiresConfirmation(toolName: String): Boolean {
-        return tools[toolName]?.requiresConfirmation == true
-    }
-    
-    private fun registerDefaultTools() {
-        register(ToolDefinition(
-            name = "web_search",
-            description = "Search the web for current information",
-            keywords = listOf("search", "find", "look up", "current", "latest", "news"),
-            requiresConfirmation = false
-        ))
-        register(ToolDefinition(
-            name = "calculate",
-            description = "Perform mathematical calculations",
-            keywords = listOf("calculate", "compute", "math", "formula"),
-            requiresConfirmation = false
-        ))
-        register(ToolDefinition(
-            name = "read_file",
-            description = "Read a file from the project",
-            keywords = listOf("read", "file", "code", "source"),
-            requiresConfirmation = false
-        ))
-        register(ToolDefinition(
-            name = "write_file",
-            description = "Write a file to the project",
-            keywords = listOf("write", "create", "save", "file"),
-            requiresConfirmation = true
-        ))
-        register(ToolDefinition(
-            name = "run_command",
-            description = "Execute a shell command",
-            keywords = listOf("run", "execute", "command", "build", "test"),
-            requiresConfirmation = true
-        ))
-        register(ToolDefinition(
-            name = "get_weather",
-            description = "Get current weather for a location",
-            keywords = listOf("weather", "temperature", "forecast"),
-            requiresConfirmation = false
-        ))
-        register(ToolDefinition(
-            name = "device_status",
-            description = "Get device battery, storage, memory info",
-            keywords = listOf("battery", "storage", "memory", "device", "status"),
-            requiresConfirmation = false
-        ))
-    }
-    
     data class ToolDefinition(
         val name: String,
         val description: String,
@@ -518,4 +446,94 @@ class ToolRegistry {
         val requiresConfirmation: Boolean = false,
         val schema: Map<String, Any> = emptyMap()
     )
+
+    /**
+     * Typed tool catalog shared by the reasoning and planning subsystems.
+     * Registering a tool describes it; it does not execute the tool.
+     */
+    class ToolRegistry {
+        private val tools = linkedMapOf<String, ToolDefinition>()
+
+        init {
+            registerDefaultTools()
+        }
+
+        @Synchronized
+        fun register(tool: ToolDefinition) {
+            require(tool.name.isNotBlank()) { "Tool name cannot be blank." }
+            tools[tool.name] = tool
+        }
+
+        @Synchronized
+        fun availableTools(): List<String> = tools.keys.toList()
+
+        @Synchronized
+        fun getTool(name: String): ToolDefinition? = tools[name]
+
+        @Synchronized
+        fun findToolForTask(task: String): ToolDefinition? {
+            val lower = task.lowercase(Locale.ROOT)
+            return tools.values.firstOrNull { tool ->
+                tool.keywords.any { lower.contains(it.lowercase(Locale.ROOT)) }
+            }
+        }
+
+        @Synchronized
+        fun requiresConfirmation(toolName: String): Boolean =
+            tools[toolName]?.requiresConfirmation == true
+
+        private fun registerDefaultTools() {
+            register(
+                ToolDefinition(
+                    name = "web_search",
+                    description = "Search the web for current information",
+                    keywords = listOf("search", "find", "look up", "current", "latest", "news")
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "calculate",
+                    description = "Perform mathematical calculations",
+                    keywords = listOf("calculate", "compute", "math", "formula")
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "read_file",
+                    description = "Read a file from the project",
+                    keywords = listOf("read", "file", "code", "source")
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "write_file",
+                    description = "Write a file to the project",
+                    keywords = listOf("write", "create", "save", "file"),
+                    requiresConfirmation = true
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "run_command",
+                    description = "Execute a shell command",
+                    keywords = listOf("run", "execute", "command", "build", "test"),
+                    requiresConfirmation = true
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "get_weather",
+                    description = "Get current weather for a location",
+                    keywords = listOf("weather", "temperature", "forecast")
+                )
+            )
+            register(
+                ToolDefinition(
+                    name = "device_status",
+                    description = "Get device battery, storage, memory info",
+                    keywords = listOf("battery", "storage", "memory", "device", "status")
+                )
+            )
+        }
+    }
 }
