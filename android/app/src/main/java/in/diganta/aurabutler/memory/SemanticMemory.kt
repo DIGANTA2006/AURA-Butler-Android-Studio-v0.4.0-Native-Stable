@@ -4,6 +4,7 @@ import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -239,6 +240,8 @@ class SemanticMemory(
         return try {
             val response = aiProvider!!.answer(prompt, context)
             parseMetadataResponse(response ?: "")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             extractMetadataHeuristic(content)
         }
@@ -467,6 +470,8 @@ class SemanticMemory(
         return try {
             val response = aiProvider!!.answer(prompt, ConversationContext.empty())
             parsePatternResponse(response ?: "", recentEntries)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             PatternResult(0, 0, listOf(e.message ?: "Pattern extraction failed"))
         }
