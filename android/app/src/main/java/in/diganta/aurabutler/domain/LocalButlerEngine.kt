@@ -8,6 +8,7 @@ import `in`.diganta.aurabutler.model.ButlerAction
 import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.time.Duration
@@ -120,7 +121,7 @@ class LocalButlerEngine(
         if (lower.containsAny("weather", "temperature", "forecast", "আবহাওয়া", "মৌসম", "मौसम")) {
             val requestedLocation = weatherLocation(request)
             val forecastDays = ForecastDayParser.parse(request)
-            return runCatching {
+            return runCatchingCancellable {
                 if (forecastDays != null) {
                     liveInfo.weatherForecast(
                         settings = context.settings,
@@ -148,7 +149,7 @@ class LocalButlerEngine(
 
         if (lower.containsAny("news", "headlines", "খবর", "समाचार")) {
             val topic = newsTopic(request)
-            return runCatching { liveInfo.headlinesFor(5, topic) }
+            return runCatchingCancellable { liveInfo.headlinesFor(5, topic) }
                 .fold(
                     onSuccess = { headlines ->
                         if (headlines.isEmpty()) {
