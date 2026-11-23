@@ -5,8 +5,11 @@ import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -50,9 +53,11 @@ class ProactiveEngine(
         AUTOMATION          // Suggest automation for repetitive task
     }
 
-    enum class Priority {
-        LOW(1), MEDIUM(2), HIGH(3), CRITICAL(4)
-        val weight: Int
+    enum class Priority(val weight: Int) {
+        LOW(1),
+        MEDIUM(2),
+        HIGH(3),
+        CRITICAL(4)
     }
 
     data class ProactiveAction(
@@ -107,16 +112,15 @@ class ProactiveEngine(
         val errorCount: Int = 0
     )
 
-    enum class AgentSchedule {
-        HOURLY,
-        DAILY,
-        WEEKLY,
-        ON_EVENT(String),  // Event name
-        CRON(String)       // Cron expression
+    sealed class AgentSchedule {
+        object HOURLY : AgentSchedule()
+        object DAILY : AgentSchedule()
+        object WEEKLY : AgentSchedule()
+        data class ON_EVENT(val eventName: String) : AgentSchedule()
+        data class CRON(val expression: String) : AgentSchedule()
     }
 
-    @FunctionalInterface
-    interface AgentTask {
+    fun interface AgentTask {
         suspend fun execute(context: AgentContext): AgentResult
     }
 
@@ -147,7 +151,11 @@ class ProactiveEngine(
 
     private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
     private val agents = ConcurrentHashMap<String, BackgroundAgent>()
-    private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+    @Volatile
+    private var scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+    @Volatile
+    private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var running = false
 
     init {
@@ -157,28 +165,36 @@ class ProactiveEngine(
     /**
      * Start the proactive engine - begins background agents and suggestion generation.
      */
+    @Synchronized
     fun start() {
         if (running) return
+        if (scheduler.isShutdown) {
+            scheduler = Executors.newScheduledThreadPool(2)
+        }
+        if (scope.coroutineContext[kotlinx.coroutines.Job]?.isCancelled != false) {
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
         running = true
-        
-        // Schedule periodic suggestion generation
+
+        // Scheduled callbacks only enqueue work; the coroutine scope owns
+        // suspend operations and is cancelled when the engine stops.
         scheduler.scheduleAtFixedRate({
-            generateProactiveSuggestions()
+            if (running) scope.launch { generateProactiveSuggestions() }
         }, 5, 15, TimeUnit.MINUTES)
-        
-        // Schedule background agents
+
         scheduleAgents()
-        
-        // Initial suggestion generation
-        generateProactiveSuggestions()
+        scope.launch { generateProactiveSuggestions() }
     }
 
     /**
-     * Stop the proactive engine.
+     * Stop scheduled and in-flight proactive work. A later start() creates
+     * fresh executors/scopes, so switching intelligence modes is reversible.
      */
+    @Synchronized
     fun stop() {
         running = false
-        scheduler.shutdown()
+        scheduler.shutdownNow()
+        scope.cancel()
     }
 
     /**
@@ -346,19 +362,22 @@ class ProactiveEngine(
             AgentSchedule.HOURLY -> 3_600_000 // 1 hour
             AgentSchedule.DAILY -> 24 * 3_600_000 // 24 hours
             AgentSchedule.WEEKLY -> 7 * 24 * 3_600_000 // 1 week
-            AgentSchedule.ON_EVENT(_) -> 3_600_000 // Check hourly for events
-            AgentSchedule.CRON(_) -> 3_600_000 // Simplified - would parse cron
+            is AgentSchedule.ON_EVENT -> 3_600_000 // Check hourly for events
+            is AgentSchedule.CRON -> 3_600_000 // Cron parsing remains a separate scheduling enhancement
         }
     }
 
     private fun runAgent(agent: BackgroundAgent) {
-        val agentContext = buildAgentContext()
-        val updatedAgent = agent.copy(lastRun = System.currentTimeMillis(), runCount = agent.runCount + 1)
+        val updatedAgent = agent.copy(
+            lastRun = System.currentTimeMillis(),
+            runCount = agent.runCount + 1
+        )
         agents[agent.id] = updatedAgent
-        
-        // Run asynchronously
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+
+        // Keep all suspend work inside the engine-owned, cancellable scope.
+        scope.launch {
             try {
+                val agentContext = buildAgentContext()
                 val result = agent.task.execute(agentContext)
                 val successAgent = updatedAgent.copy(
                     successCount = updatedAgent.successCount + (if (result.success) 1 else 0),
@@ -385,19 +404,19 @@ class ProactiveEngine(
         }
     }
 
-    private fun buildAgentContext(): AgentContext {
-        // In production, get real device state
+    private suspend fun buildAgentContext(): AgentContext {
+        val conversationContext = contextProvider.getCurrentContext()
+        val memoryResult = semanticMemory.recall(
+            query = "recent",
+            context = conversationContext,
+            options = SemanticMemory.RecallOptions(
+                maxResults = 20,
+                strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
+            )
+        )
         return AgentContext(
-            deviceState = DeviceState(
-                batteryLevel = 75,
-                isCharging = false,
-                networkType = "WIFI",
-                storageFreePercent = 35.0,
-                screenOn = true,
-                foregroundApp = "in.diganta.aurabutler"
-            ),
-            recentMemories = semanticMemory.recall("recent", ConversationContext.empty(), 
-                SemanticMemory.RecallOptions(maxResults = 20, strategy = SemanticMemory.RetrievalStrategy.TEMPORAL)).entries.map { it.entry },
+            deviceState = contextProvider.getDeviceState(),
+            recentMemories = memoryResult.entries.map { it.entry },
             activePlans = emptyList(),
             userPreferences = settings
         )
@@ -452,7 +471,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.MORNING
+                        timeRelevance = TimeRelevance.MORNING
                     )
                 )
             }
@@ -670,7 +689,7 @@ class ProactiveEngine(
     private suspend fun executeAction(action: ProactiveAction, context: ConversationContext) {
         // In production, integrate with action execution system
         when (action.type) {
-            ProactiveAction.ActionType.SHOW_NOTIFICATION -> {
+            ActionType.SHOW_NOTIFICATION -> {
                 // Show notification
             }
             ProactiveAction.ActionType.ASK_QUESTION -> {
