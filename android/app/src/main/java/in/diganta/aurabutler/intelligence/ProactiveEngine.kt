@@ -5,6 +5,7 @@ import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -409,6 +410,8 @@ class ProactiveEngine(
                 // The current engine has no action executor. Keep auto-execution
                 // disabled here; suggestions must never be reported as performed.
                 if (running && successAgent.enabled) scheduleAgent(successAgent)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 val errorAgent = updatedAgent.copy(
                     errorCount = updatedAgent.errorCount + 1,
