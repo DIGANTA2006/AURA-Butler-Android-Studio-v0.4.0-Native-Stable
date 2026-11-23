@@ -4,6 +4,9 @@ import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
 import `in`.diganta.aurabutler.intelligence.IntelligenceCoordinator
 import `in`.diganta.aurabutler.intelligence.ProactiveEngine
+import `in`.diganta.aurabutler.intelligence.ReasoningEngine
+import `in`.diganta.aurabutler.memory.SemanticMemory
+import `in`.diganta.aurabutler.planning.TaskPlanner
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ActionRisk
 import `in`.diganta.aurabutler.model.ButlerAction
@@ -11,11 +14,8 @@ import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 /**
@@ -43,8 +43,9 @@ class EnhancedButlerEngine(
     }
     
     // State
+    @Volatile
     private var initialized = false
-    private val initScope = CoroutineScope(Dispatchers.IO)
+    private val initializationMutex = Mutex()
 
     /**
      * Main chat entry point - enhanced with intelligence capabilities.
@@ -96,8 +97,8 @@ class EnhancedButlerEngine(
     suspend fun recall(
         query: String,
         context: ConversationContext,
-        options: IntelligenceCoordinator.SemanticMemory.RecallOptions = IntelligenceCoordinator.SemanticMemory.RecallOptions()
-    ): IntelligenceCoordinator.SemanticMemory.RetrievalResult? {
+        options: SemanticMemory.RecallOptions = SemanticMemory.RecallOptions()
+    ): SemanticMemory.RetrievalResult? {
         return intelligenceCoordinator?.recall(query, context, options)
     }
 
@@ -108,7 +109,7 @@ class EnhancedButlerEngine(
         goal: String,
         context: ConversationContext,
         autoExecute: Boolean = false
-    ): IntelligenceCoordinator.TaskPlanner.ExecutionResult? {
+    ): TaskPlanner.ExecutionResult? {
         return intelligenceCoordinator?.createAndExecutePlan(goal, context, autoExecute)
     }
 
@@ -128,12 +129,13 @@ class EnhancedButlerEngine(
 
     // ===== Private Implementation =====
 
-    private fun initialize() {
+    private suspend fun initialize() {
         if (initialized) return
-        initialized = true
-        
-        initScope.launch {
+        initializationMutex.withLock {
+            if (initialized) return@withLock
+            // Await coordinator initialization before the first intelligent turn.
             intelligenceCoordinator?.initialize()
+            initialized = true
         }
     }
 
@@ -202,7 +204,7 @@ class EnhancedButlerEngine(
             actions += ButlerAction(
                 id = UUID.randomUUID().toString(),
                 kind = ActionKind.OPEN_APP,
-                title = "Execute plan: ${plan.goal}",
+                title = "Execute plan: ${plan.description}",
                 summary = "Plan with ${plan.tasks.size} steps: ${plan.tasks.map { it.title }.joinToString(", ")}",
                 risk = ActionRisk.MEDIUM,
                 payload = mapOf(
@@ -233,7 +235,7 @@ class EnhancedButlerEngine(
         if (result.reasoningTrace != null && result.reasoningTrace!!.isNotEmpty()) {
             // Optionally include reasoning summary
             val reasoningSummary = result.reasoningTrace!!
-                .filter { it.type == IntelligenceCoordinator.ReasoningEngine.StepType.CONCLUSION }
+                .filter { it.type == ReasoningEngine.StepType.CONCLUSION }
                 .map { it.content }
                 .joinToString(" ")
             if (reasoningSummary.isNotBlank()) {
