@@ -705,10 +705,19 @@ class WakeWordService : Service() {
 
         val interrupted = listenForWakeDuringSpeech(session)
         if (!interrupted) {
-            session.await(
-                SPEECH_FINISH_GRACE_SECONDS,
+            // The wake monitor may return early after an audio-device error.
+            // Do not resume a queued answer while this utterance is still playing.
+            val expectedSpeechSeconds = (
+                MIN_SPEECH_COMPLETION_WAIT_SECONDS + clean.length / 8
+                ).coerceAtMost(MAX_SPEECH_COMPLETION_WAIT_SECONDS).toLong()
+            val completed = session.await(
+                expectedSpeechSeconds,
                 TimeUnit.SECONDS
             )
+            if (!completed) {
+                Log.w(TAG, "Stopping TTS session after its bounded completion deadline")
+                session.stop()
+            }
             resumePendingSpeechIfAny(bargeInDepth)
             return
         }
@@ -1193,7 +1202,8 @@ class WakeWordService : Service() {
         private const val MAX_PENDING_SPEECH_CONTINUATIONS = 6
         private const val BARGE_IN_STARTUP_GRACE_MS = 650L
         private const val BARGE_IN_COMMAND_DELAY_MS = 105L
-        private const val SPEECH_FINISH_GRACE_SECONDS = 2L
+        private const val MIN_SPEECH_COMPLETION_WAIT_SECONDS = 8
+        private const val MAX_SPEECH_COMPLETION_WAIT_SECONDS = 90
         private const val TAG = "AuraWakeService"
 
         fun setEnabled(context: Context, enabled: Boolean) {
