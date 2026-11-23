@@ -41,6 +41,8 @@ import `in`.diganta.aurabutler.voice.OwnerVoiceGuard
 import `in`.diganta.aurabutler.voice.SpeechTextSanitizer
 import `in`.diganta.aurabutler.voice.VoiceAudioRecorder
 import `in`.diganta.aurabutler.voice.VoiceDiagnostics
+import `in`.diganta.aurabutler.voice.VoiceCommandClassifier
+import `in`.diganta.aurabutler.voice.SpeechContinuationStack
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -74,6 +76,10 @@ class WakeWordService : Service() {
     private var manualCaptureRequested = false
 
     private val pendingSpeech = AtomicReference<String?>(null)
+    private val speechContinuations = SpeechContinuationStack(MAX_PENDING_SPEECH_CONTINUATIONS)
+
+    @Volatile
+    private var speechPaused = false
 
     @Volatile
     private var activeRecorder: AudioRecord? = null
@@ -277,30 +283,65 @@ class WakeWordService : Service() {
                     )
                     Log.i(TAG, "Command transcript length=${transcript.length}")
 
-                    if (transcript.isBlank()) {
-                        speakIfEnabled("I'm sorry, I could not understand that.")
-                    } else if (
-                        transcript.containsAny(
-                            "stop listening",
-                            "disable wake word",
-                            "go to sleep"
-                        )
-                    ) {
-                        store.saveSettings(store.loadSettings().copy(wakeWordEnabled = false))
-                        speakIfEnabled("Wake listening is now off.")
-                        sendBroadcast(
-                            Intent(ACTION_STATE_CHANGED).setPackage(packageName)
-                        )
-                        running = false
-                    } else {
-                        updateNotification("Handling: ${transcript.take(70)}")
-                        val result = processor.process(transcript)
-                        if (result.shouldSpeak) {
-                            AuraRuntimeStateMachine.safeTransition(
-                                AuraRuntimeState.SPEAKING,
-                                "speaking command result"
+                    when (VoiceCommandClassifier.controlIntent(transcript)) {
+                        VoiceCommandClassifier.ControlIntent.STOP_LISTENING -> {
+                            speechContinuations.clear()
+                            speechPaused = false
+                            store.saveSettings(store.loadSettings().copy(wakeWordEnabled = false))
+                            speakIfEnabled("Wake listening is now off.")
+                            sendBroadcast(
+                                Intent(ACTION_STATE_CHANGED).setPackage(packageName)
                             )
-                            speakFast(result.speech)
+                            running = false
+                        }
+
+                        VoiceCommandClassifier.ControlIntent.STOP_SPEECH -> {
+                            speechContinuations.clear()
+                            speechPaused = false
+                            updateNotification("Speech queue cleared")
+                        }
+
+                        VoiceCommandClassifier.ControlIntent.PAUSE_SPEECH -> {
+                            if (speechContinuations.size() > 0) {
+                                speechPaused = true
+                                updateNotification("Speech paused • say continue to resume")
+                            } else {
+                                speakIfEnabled("There is no paused reply to pause.")
+                            }
+                        }
+
+                        VoiceCommandClassifier.ControlIntent.RESUME_SPEECH -> {
+                            speechPaused = false
+                            val continuation = speechContinuations.pop()
+                            if (continuation != null) {
+                                AuraRuntimeStateMachine.safeTransition(
+                                    AuraRuntimeState.SPEAKING,
+                                    "resuming paused speech"
+                                )
+                                speakFast(continuation)
+                            } else {
+                                speakIfEnabled("There is no paused reply to resume.")
+                            }
+                        }
+
+                        VoiceCommandClassifier.ControlIntent.NONE -> {
+                            val assessment = VoiceCommandClassifier.assess(transcript)
+                            if (!assessment.isComplete) {
+                                Log.i(TAG, "Deferred incomplete voice command: ${assessment.reason}")
+                                speakIfEnabled(
+                                    "Your instruction seems incomplete. Please finish your command."
+                                )
+                            } else {
+                                updateNotification("Handling: ${transcript.take(70)}")
+                                val result = processor.process(transcript)
+                                if (result.shouldSpeak) {
+                                    AuraRuntimeStateMachine.safeTransition(
+                                        AuraRuntimeState.SPEAKING,
+                                        "speaking command result"
+                                    )
+                                    speakFast(result.speech)
+                                }
+                            }
                         }
                     }
 
@@ -595,6 +636,8 @@ class WakeWordService : Service() {
         running = false
         manualCaptureRequested = false
         pendingSpeech.set(null)
+        speechContinuations.clear()
+        speechPaused = false
         runCatching { activeRecorder?.stop() }
         if (::fastSpeaker.isInitialized) fastSpeaker.stop()
         AuraVoiceRuntime.speaker.stop()
@@ -641,11 +684,9 @@ class WakeWordService : Service() {
 
         val wakeEnabled = speechSettings.wakeWordEnabled
 
-        if (
-            !wakeEnabled ||
-            bargeInDepth >= MAX_BARGE_IN_DEPTH
-        ) {
+        if (!wakeEnabled || bargeInDepth >= MAX_BARGE_IN_DEPTH) {
             speakWithoutBargeIn(clean)
+            resumePendingSpeechIfAny(bargeInDepth)
             return
         }
 
@@ -658,6 +699,7 @@ class WakeWordService : Service() {
             // native runtime with the wake detector, so barge-in is disabled
             // only for this fallback utterance.
             AuraVoiceRuntime.speaker.speakAndWait(clean)
+            resumePendingSpeechIfAny(bargeInDepth)
             return
         }
 
@@ -667,110 +709,149 @@ class WakeWordService : Service() {
                 SPEECH_FINISH_GRACE_SECONDS,
                 TimeUnit.SECONDS
             )
+            resumePendingSpeechIfAny(bargeInDepth)
             return
         }
 
         val remainingSpeech = session.remainingText()
         val command = captureBargeInCommand()
 
-        when {
+        if (
             command.isNullOrBlank() ||
-                SpeechTextSanitizer.isWakeWordOnly(command) -> {
-                if (remainingSpeech.isNotBlank() && running) {
-                    updateNotification(
-                        "No command heard • continuing the previous reply"
-                    )
-                    AuraRuntimeStateMachine.safeTransition(
-                        AuraRuntimeState.SPEAKING,
-                        "resuming interrupted reply"
-                    )
-                    speakFast(
-                        remainingSpeech,
-                        bargeInDepth + 1
-                    )
-                }
-            }
-
-            command.containsAny(
-                "stop talking",
-                "stop speaking",
-                "be quiet",
-                "cancel speech",
-                "cancel that",
-                "enough"
-            ) -> {
-                updateNotification("Previous reply stopped")
-                AuraRuntimeStateMachine.forceIdle(
-                    "owner stopped current speech"
+            SpeechTextSanitizer.isWakeWordOnly(command)
+        ) {
+            if (remainingSpeech.isNotBlank() && running) {
+                updateNotification("No command heard • continuing the previous reply")
+                AuraRuntimeStateMachine.safeTransition(
+                    AuraRuntimeState.SPEAKING,
+                    "resuming interrupted reply"
                 )
+                speakFast(remainingSpeech, bargeInDepth + 1)
+            } else {
+                resumePendingSpeechIfAny(bargeInDepth)
+            }
+            return
+        }
+
+        when (VoiceCommandClassifier.controlIntent(command)) {
+            VoiceCommandClassifier.ControlIntent.STOP_LISTENING -> {
+                speechContinuations.clear()
+                speechPaused = false
+                store.saveSettings(
+                    store.loadSettings().copy(wakeWordEnabled = false)
+                )
+                sendBroadcast(
+                    Intent(ACTION_STATE_CHANGED).setPackage(packageName)
+                )
+                running = false
+                speakWithoutBargeIn("Wake listening is now off.")
             }
 
-            command.containsAny(
-                "continue",
-                "continue talking",
-                "resume",
-                "resume speaking",
-                "carry on"
-            ) -> {
-                if (remainingSpeech.isNotBlank() && running) {
+            VoiceCommandClassifier.ControlIntent.STOP_SPEECH -> {
+                speechContinuations.clear()
+                speechPaused = false
+                updateNotification("Previous reply stopped")
+                AuraRuntimeStateMachine.forceIdle("owner stopped current speech")
+            }
+
+            VoiceCommandClassifier.ControlIntent.PAUSE_SPEECH -> {
+                if (remainingSpeech.isNotBlank()) {
+                    speechContinuations.push(remainingSpeech)
+                }
+                speechPaused = true
+                updateNotification("Reply paused • say Aura, then continue to resume")
+                AuraRuntimeStateMachine.forceIdle("owner paused current speech")
+            }
+
+            VoiceCommandClassifier.ControlIntent.RESUME_SPEECH -> {
+                speechPaused = false
+                val continuation = remainingSpeech
+                    .takeIf(String::isNotBlank)
+                    ?: speechContinuations.pop()
+                if (continuation != null && running) {
                     AuraRuntimeStateMachine.safeTransition(
                         AuraRuntimeState.SPEAKING,
                         "owner resumed interrupted reply"
                     )
-                    speakFast(
-                        remainingSpeech,
-                        bargeInDepth + 1
-                    )
+                    speakFast(continuation, bargeInDepth + 1)
+                } else {
+                    resumePendingSpeechIfAny(bargeInDepth)
                 }
             }
 
-            command.containsAny(
-                "stop listening",
-                "disable wake word",
-                "go to sleep"
-            ) -> {
-                store.saveSettings(
-                    store.loadSettings().copy(
-                        wakeWordEnabled = false
-                    )
-                )
-                sendBroadcast(
-                    Intent(ACTION_STATE_CHANGED)
-                        .setPackage(packageName)
-                )
-                running = false
-                speakWithoutBargeIn(
-                    "Wake listening is now off."
-                )
-            }
+            VoiceCommandClassifier.ControlIntent.NONE -> {
+                val assessment = VoiceCommandClassifier.assess(command)
+                if (remainingSpeech.isNotBlank()) {
+                    speechContinuations.push(remainingSpeech)
+                }
 
-            else -> {
+                if (!assessment.isComplete) {
+                    Log.i(TAG, "Deferred incomplete barge-in command: ${assessment.reason}")
+                    updateNotification("The command seems incomplete • please finish it")
+                    AuraRuntimeStateMachine.safeTransition(
+                        AuraRuntimeState.SPEAKING,
+                        "asking user to complete interrupted command"
+                    )
+                    speakFast(
+                        "Your instruction seems incomplete. Please finish your command.",
+                        bargeInDepth + 1
+                    )
+                    return
+                }
+
                 updateNotification(
-                    "Handling interrupted command: " +
-                        command.take(60)
+                    "Handling interrupted command: " + command.take(60)
                 )
                 AuraRuntimeStateMachine.safeTransition(
                     AuraRuntimeState.THINKING,
                     "handling barge-in command"
                 )
-                val result = processor.process(command)
+                val result = try {
+                    processor.process(command)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Interrupted command processing failed", error)
+                    BackgroundCommandResult(
+                        speech = "I could not complete that command. I will continue the previous response.",
+                        shouldSpeak = store.loadSettings().spokenReplies
+                    )
+                }
 
-                if (
-                    result.shouldSpeak &&
-                    result.speech.isNotBlank() &&
-                    running
-                ) {
+                if (result.shouldSpeak && result.speech.isNotBlank() && running) {
                     AuraRuntimeStateMachine.safeTransition(
                         AuraRuntimeState.SPEAKING,
                         "speaking barge-in result"
                     )
-                    // A valid new command replaces the old unfinished reply.
-                    speakFast(
-                        result.speech,
-                        bargeInDepth + 1
-                    )
+                    // When this answer finishes, speakFast drains the most
+                    // recently interrupted continuation before older ones.
+                    speakFast(result.speech, bargeInDepth + 1)
+                } else {
+                    resumePendingSpeechIfAny(bargeInDepth + 1)
                 }
             }
+        }
+    }
+
+    /**
+     * Drains interrupted responses in LIFO order after the current answer.
+     * A pause deliberately holds the queue; stop/cancel clears it.
+     */
+    private suspend fun resumePendingSpeechIfAny(bargeInDepth: Int) {
+        if (!running || speechPaused) return
+        val continuation = speechContinuations.pop() ?: return
+        if (continuation.isBlank()) {
+            resumePendingSpeechIfAny(bargeInDepth)
+            return
+        }
+
+        AuraRuntimeStateMachine.safeTransition(
+            AuraRuntimeState.SPEAKING,
+            "resuming queued speech continuation"
+        )
+        if (bargeInDepth >= MAX_BARGE_IN_DEPTH) {
+            speakWithoutBargeIn(continuation)
+            resumePendingSpeechIfAny(bargeInDepth)
+        } else {
+            speakFast(continuation, bargeInDepth + 1)
         }
     }
 
@@ -1109,6 +1190,7 @@ class WakeWordService : Service() {
         private const val RETRY_DELAY_MS = 1_200L
         private const val MAX_SPEECH_CHARS = 1_500
         private const val MAX_BARGE_IN_DEPTH = 6
+        private const val MAX_PENDING_SPEECH_CONTINUATIONS = 6
         private const val BARGE_IN_STARTUP_GRACE_MS = 650L
         private const val BARGE_IN_COMMAND_DELAY_MS = 105L
         private const val SPEECH_FINISH_GRACE_SECONDS = 2L
