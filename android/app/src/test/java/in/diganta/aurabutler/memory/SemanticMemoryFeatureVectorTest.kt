@@ -105,6 +105,7 @@ class SemanticMemoryFeatureVectorTest {
         )
 
         val result = memory.consolidate()
+        println("SEMANTIC_MEMORY_TEST_DIAGNOSTIC result=" + result + "; labels=" + store.getAll().map { it.label })
         val concept = store.getAll().firstOrNull {
             it.source == SemanticMemory.MemorySource.CONSOLIDATED &&
                 it.label == "Concept: Execution safety"
