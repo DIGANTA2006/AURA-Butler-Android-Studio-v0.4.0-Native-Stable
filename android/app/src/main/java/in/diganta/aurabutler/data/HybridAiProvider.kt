@@ -284,6 +284,58 @@ class HybridAiProvider(
         const val PROVIDER_GEMINI = "gemini"
         const val PROVIDER_GROQ = "groq"
 
+        fun normalizeProvider(value: String): String = when (
+            value.trim().lowercase(Locale.ROOT)
+        ) {
+            PROVIDER_LOCAL -> PROVIDER_LOCAL
+            PROVIDER_GEMINI -> PROVIDER_GEMINI
+            PROVIDER_GROQ -> PROVIDER_GROQ
+            else -> PROVIDER_AUTOMATIC
+        }
+
+        /**
+         * Public-provider access is explicit: selecting that provider grants
+         * consent for it; automatic mode requires the separate fallback switch.
+         */
+        fun publicProviderAllowed(
+            settings: ButlerSettings,
+            provider: String = PROVIDER_GEMINI
+        ): Boolean {
+            val selected = normalizeProvider(settings.aiProvider)
+            return when (normalizeProvider(provider)) {
+                PROVIDER_GEMINI ->
+                    selected == PROVIDER_GEMINI || settings.allowPublicAiFallback
+                PROVIDER_GROQ ->
+                    selected == PROVIDER_GROQ || settings.allowPublicAiFallback
+                else -> false
+            }
+        }
+
+        fun configuredProviderLabel(settings: ButlerSettings): String {
+            if (!settings.aiEnabled) return "local-only"
+            val configured = buildList {
+                if (
+                    settings.localAiEnabled &&
+                    settings.localAiEndpoint.isNotBlank() &&
+                    settings.localAiModel.isNotBlank()
+                ) add("private-qwen")
+                if (
+                    settings.geminiApiKey.isNotBlank() &&
+                    publicProviderAllowed(settings, PROVIDER_GEMINI)
+                ) add("gemini")
+                if (
+                    settings.groqApiKey.isNotBlank() &&
+                    publicProviderAllowed(settings, PROVIDER_GROQ)
+                ) add("groq")
+            }
+            return when (normalizeProvider(settings.aiProvider)) {
+                PROVIDER_LOCAL -> configured.firstOrNull { it == "private-qwen" }
+                PROVIDER_GEMINI -> configured.firstOrNull { it == "gemini" }
+                PROVIDER_GROQ -> configured.firstOrNull { it == "groq" }
+                else -> configured.joinToString("→").takeIf(String::isNotBlank)
+            } ?: "local-only"
+        }
+
         private const val LOCAL_PROVIDER_TIMEOUT_MS = 125_000L
         private const val PUBLIC_PROVIDER_TIMEOUT_MS = 40_000L
         private const val MAX_STREAM_CHARACTERS = 500_000
