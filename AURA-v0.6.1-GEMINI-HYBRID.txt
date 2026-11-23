@@ -1,0 +1,43 @@
+AURA v0.6.1 Gemini + Groq hybrid update
+
+PURPOSE
+- Updates the existing v0.6 mobile-production Android project only.
+- Keeps wake word, Whisper, phone commands, reminders and memory local.
+- Keeps weather, news and Wikipedia keyless.
+- Uses optional AI only for unresolved general, complex, translation or programming requests.
+
+PROVIDER ROUTING
+- Automatic: Gemini first when configured, then Groq fallback.
+- Gemini: Gemini only.
+- Groq: Groq only.
+- No configured key: AURA remains local-first and offers a web search.
+
+GEMINI MODELS
+- Fast: gemini-3.1-flash-lite
+- Pro / deep: gemini-2.5-pro
+- When the selected Gemini model is unavailable, AURA retries the fast model.
+
+GROQ MODELS
+- Fast: openai/gpt-oss-20b
+- Higher quality: openai/gpt-oss-120b
+
+SETUP AFTER INSTALLATION
+1. Open AURA > Settings.
+2. Enable "Use optional AI for complex or programming questions".
+3. Choose Automatic, Gemini or Groq.
+4. Paste your Gemini API key from Google AI Studio.
+5. Choose Fast or Pro / deep.
+6. Leave Groq blank for Gemini-only operation, or paste Groq as fallback.
+7. Save settings.
+8. Ask: "AI status" to verify the configured route.
+
+SECURITY
+- No API key is embedded in this updater, Kotlin source or APK assets.
+- Keys entered after installation are stored in AURA's encrypted preferences.
+- The direct-key mode is intended for the owner's private sideloaded build.
+- For public distribution, use a backend proxy and keep provider keys server-side.
+- AURA redacts likely passwords, PINs, OTPs, card numbers and API keys before optional AI calls.
+
+IMPORTANT
+Google AI Pro membership and Gemini API billing/quota are separate. AURA uses the
+Gemini API key and project quota shown in Google AI Studio / Google Cloud.

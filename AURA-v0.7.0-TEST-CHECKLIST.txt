@@ -1,0 +1,113 @@
+AURA v0.7.0 — One-by-One Test Checklist
+========================================
+
+PREPARATION
+-----------
+[ ] Build ends with: AURA v0.7.0 BUILD AND TESTS SUCCESSFUL
+[ ] Install with Android Studio Run without uninstalling the existing app.
+[ ] Open AURA once after installation.
+[ ] Keep internet on for Gemini/news tests.
+[ ] Keep the Gemini API key configured for image/research/detailed-news tests.
+
+A. REGRESSION — VOICE AND APP CONTROL
+-------------------------------------
+[ ] Type: Open YouTube
+[ ] Type: Please open Chrome
+[ ] Say: Aura, then Open WhatsApp
+[ ] Confirm wake listening still resumes after the opened app closes.
+
+B. NOTIFICATION ACCESS
+----------------------
+[ ] Open Analyzer tab.
+[ ] Tap Grant notification access.
+[ ] Enable AURA private notification analyzer.
+[ ] Return to AURA and tap Refresh Analyzer status.
+[ ] Status says Notification access granted.
+
+C. WHATSAPP AND MESSAGE CAPTURE
+-------------------------------
+[ ] Receive a new WhatsApp test message after access is granted.
+[ ] Ask: Read my WhatsApp messages.
+[ ] Ask: Summarize my WhatsApp messages in detail.
+[ ] Confirm old chats that produced no notification are not claimed as read.
+
+D. MAIL, SLACK AND JIRA PREVIEWS
+--------------------------------
+[ ] Receive a Gmail notification and ask: Read my mail notifications.
+[ ] Receive a Slack/Jira notification when those apps are installed.
+[ ] Ask: Summarize my Slack notifications.
+[ ] Ask: Summarize my Jira notifications.
+
+E. IMPORTANT-NOTIFICATION ANALYZER
+----------------------------------
+[ ] Receive a test notification containing “urgent”, “exam tomorrow” or
+    “payment failed”.
+[ ] Confirm AURA creates a counts-only proactive alert.
+[ ] Ask: Read my important notifications in detail.
+[ ] Lock the phone and repeat; confirm message contents stay hidden.
+
+F. LOCAL AND CLOUD PRIVACY
+--------------------------
+[ ] In Settings, keep Cloud notification summaries OFF.
+[ ] Ask for a detailed notification digest; provider remains local.
+[ ] Turn Cloud notification summaries ON.
+[ ] Ask again; secret-like values such as OTP/PIN are not repeated.
+[ ] Tap Delete encrypted notification history and confirm count returns to zero.
+
+G. IMAGE ANALYSIS
+-----------------
+[ ] Ask: Analyze an image.
+[ ] Approve the card and choose a normal photo/screenshot.
+[ ] Confirm AURA describes visible text and objects.
+[ ] Cancel image selection once; confirm no image is analyzed.
+
+H. SCREEN ANALYSIS
+------------------
+[ ] Open a harmless screen containing text or an error.
+[ ] Ask: Analyze this screen.
+[ ] Approve the card and approve Android screen sharing.
+[ ] Confirm one frame is captured and explained.
+[ ] Repeat and cancel Android sharing; confirm nothing is captured.
+[ ] Do not test on banking, OTP, password or recovery-phrase screens.
+
+I. DETAILED NEWS
+----------------
+[ ] Ask: Tell me today's important news in detail with sources.
+[ ] Confirm every item includes explanation, why it matters and sources.
+[ ] Ask: Give me detailed technology news with sources.
+[ ] Disable optional AI and repeat; confirm keyless headline/source mode works.
+
+J. DEEP RESEARCH
+----------------
+[ ] Ask: Deep research today's most important AI developments.
+[ ] Confirm current information and a Sources section are displayed.
+[ ] Turn Research OFF and confirm AURA explains that grounded research is disabled.
+
+K. SONG FINDER
+--------------
+[ ] Play music from another device.
+[ ] Ask: Identify this song.
+[ ] Confirm Google/system song identification opens.
+[ ] Test the browser fallback on a device without the direct music-search action.
+
+L. TEMPORAL MEMORY
+------------------
+[ ] Say: Remember that I prefer brief news.
+[ ] Later say: Remember that I prefer detailed news.
+[ ] Ask: Memory history news preference.
+[ ] Confirm the previous and current versions are retained locally.
+
+M. SCHEDULED DIGEST
+-------------------
+[ ] Keep Scheduled Analyzer Digests enabled.
+[ ] Confirm WorkManager schedules a 12-hour counts-only digest.
+[ ] Remember that Android can delay periodic work because of battery/Doze rules.
+
+N. STABILITY AND LOGCAT
+-----------------------
+[ ] No crash after notification listener is enabled.
+[ ] No crash after screen capture is cancelled.
+[ ] No crash after Gemini/network failure.
+[ ] Logcat filters:
+    AuraNotificationListener|AuraScreenCapture|AuraActionExecutor|
+    WorkManager|AndroidRuntime

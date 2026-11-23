@@ -1,0 +1,74 @@
+AURA v0.8.2 — Test Checklist
+================================
+
+A. INSTALLATION
+[ ] Build ends with AURA v0.8.2 BUILD AND TESTS SUCCESSFUL
+[ ] Install through Android Studio Run without uninstalling AURA
+[ ] Settings and earlier API keys remain available
+
+B. KEYLESS NEWS
+[ ] Leave GNews API key blank
+[ ] Say: Tell me the news
+[ ] AURA reads numbered headlines
+[ ] Say: Briefly tell me the news
+[ ] AURA adds a short description to each headline
+[ ] Say: Tell me technology news
+[ ] Results are related to technology
+
+C. NEWS FOLLOW-UP
+[ ] After reading headlines, say: Explain headline one
+[ ] AURA explains headline 1 and shows its source
+[ ] Say: Briefly explain the second headline
+[ ] AURA gives a shorter explanation of headline 2
+[ ] Restart AURA and repeat a numbered follow-up
+[ ] Recent headline context remains available
+
+D. GNEWS FREE API
+[ ] Create a GNews key and enter it under Settings > Live news and weather
+[ ] Save settings
+[ ] Say: Tell me the news
+[ ] Response provider is gnews-free-api in message diagnostics
+[ ] Remove or invalidate the key
+[ ] AURA falls back to keyless RSS rather than failing
+
+E. GEMINI DETAILED NEWS
+[ ] Enable optional AI and Grounded deep research
+[ ] Configure Gemini
+[ ] Say: Tell me detailed news
+[ ] AURA returns verified details and sources
+[ ] Say: Tell me the first news in detail
+[ ] AURA researches that selected headline
+
+F. CURRENT WEATHER
+[ ] Say: What is the weather?
+[ ] AURA uses the saved home location
+[ ] Say: What is the weather in Kolkata?
+[ ] AURA resolves Kolkata and reports current conditions
+
+G. 10-DAY FORECAST
+[ ] Say: Tell me the 10-day weather forecast
+[ ] Exactly 10 numbered days are displayed
+[ ] Say: Give me a ten-day forecast for Kolkata
+[ ] Location is Kolkata and 10 days are displayed
+[ ] Say: Weather for next week
+[ ] Seven days are displayed
+[ ] Say: Show a 14-day forecast
+[ ] Fourteen days are displayed
+
+H. SPELLING RECOVERY
+[ ] Say/type: tell me bews
+[ ] Command is corrected to news
+[ ] Say/type: befley tell me any new headine
+[ ] Command is corrected and brief headlines are returned
+[ ] Say/type: tell me 10 days weathre forcast
+[ ] Command is corrected and a 10-day forecast is returned
+
+I. FAILURE HANDLING
+[ ] Disable internet and ask for news
+[ ] AURA reports that live news is unavailable without crashing
+[ ] Disable internet and ask for weather
+[ ] AURA reports that weather is unavailable without crashing
+[ ] Restore internet and repeat both commands
+
+Useful Logcat filter:
+FreeNewsProvider|NewsCommandEngine|AuraWakeService|AndroidRuntime|FATAL EXCEPTION

@@ -1,0 +1,25 @@
+AURA v0.6.2 App Control
+
+This update fixes commands such as:
+- Open YouTube
+- Please open Chrome
+- Could you launch Gmail please
+- Open WhatsApp
+- Open Google Maps
+- Open Spotify
+- Open any other installed launcher app by its visible label
+
+What changed:
+- Explicit low-risk app-opening commands execute immediately.
+- Background wake commands no longer create approval cards for opening apps.
+- Sensitive actions such as messages, email, calls, reminders, calendar changes,
+  and sharing still require approval.
+- App names are normalized, including "You Tube", "YT", polite command forms,
+  and common aliases.
+- Known Android package names and generic launcher-label discovery are both used.
+- YouTube and supported web services fall back to their secure website when the
+  native app is not installed.
+- App-control execution is recorded in AURA's private audit log.
+- Logcat tags: AuraActionExecutor and AuraBackgroundAction.
+
+No Gemini or Groq key is changed by this update.

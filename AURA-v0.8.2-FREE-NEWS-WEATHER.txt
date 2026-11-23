@@ -1,0 +1,72 @@
+AURA v0.8.2 — Free News and 10-Day Weather
+================================================
+
+Version name: 0.8.2-free-news-weather
+Version code: 12
+
+NEWS COMMANDS
+-------------
+Tell me the news
+- Reads the latest numbered headlines only.
+
+Briefly tell me the news
+Brief technology news
+- Reads each headline with one short factual description.
+
+Tell me detailed news
+Tell me full news about West Bengal
+- Uses Gemini grounded research when enabled.
+- Without Gemini, shows the best description supplied by the news feed and source links.
+
+Explain headline one
+Briefly explain the second headline
+Tell me the third news in detail
+- Expands a story from AURA's most recently saved encrypted headline list.
+
+FREE NEWS SOURCES
+-----------------
+1. Optional GNews free API
+   - Add a GNews API key in Settings > Live news and weather.
+   - The key is stored in encrypted preferences.
+   - Free-tier delivery and usage limits are controlled by GNews.
+
+2. Keyless fallback
+   - Google News RSS for India is used automatically when no GNews key is set,
+     when the free quota is exhausted, or when the API call fails.
+
+AURA does not copy or scrape full publisher articles. It provides a summary,
+source, publication time, and link. Gemini grounded research can create a
+verified multi-source explanation when optional AI and research are enabled.
+
+WEATHER COMMANDS
+----------------
+What is the weather?
+What is the weather in Kolkata?
+Tell me the 10-day weather forecast
+Give me a ten-day forecast for Kolkata
+Weather for next week
+Show a 14-day forecast
+
+Open-Meteo requires no API key for this private build. Forecasts support 3 to
+16 days and include:
+- condition
+- minimum and maximum temperature
+- apparent temperature range
+- rain probability and expected precipitation
+- maximum wind speed
+
+COMMAND CORRECTION
+------------------
+The local normalizer now repairs common forms including:
+bews/newz -> news
+headine -> headline
+weathre/wether -> weather
+forcast/forecat -> forecast
+befley/brifly -> briefly
+
+PRIVACY
+-------
+- GNews key is encrypted on the phone.
+- Recent headline metadata is stored encrypted for follow-up commands.
+- Article pages are not silently downloaded or copied.
+- Weather calls send only the requested coordinates or place query.

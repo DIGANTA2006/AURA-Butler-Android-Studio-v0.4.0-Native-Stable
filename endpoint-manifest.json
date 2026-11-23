@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "textEndpoint": "https://YOUR_MODAL_APP--qwentext-web.modal.run/v1/chat/completions",
+  "visionEndpoint": "https://YOUR_MODAL_APP--gemmavision-web.modal.run/v1/chat/completions",
+  "researchEndpoint": "https://YOUR_MODAL_APP--researchgateway-web.modal.run/v1/research",
+  "models": {
+    "text": "Qwen/Qwen3-8B",
+    "vision": "google/gemma-3-4b-it",
+    "research": "Qwen/Qwen3-8B"
+  },
+  "budgets": {
+    "dailyText": 0,
+    "dailyVision": 0,
+    "dailyResearch": 0,
+    "dailyAuxiliary": 0
+  }
+}

@@ -1,0 +1,28 @@
+AURA engineering audit — v0.8.4 to v0.9.0
+
+Corrected/high-priority findings:
+1. Cloud providers received personal memory automatically; private context is now off by default.
+2. Network providers used unbounded readText(); touched providers now use bounded response reads.
+3. Added an owner-configurable OpenAI-compatible Ollama/LM Studio bridge.
+4. Added HTTPS enforcement and loopback-only HTTP endpoint validation.
+5. Added prompt-injection boundaries for notification/external data.
+6. Centralized professional butler behavior across providers.
+7. Added response deduplication and formatting quality gate.
+8. Updated stale provider User-Agent versions.
+9. Added a secret-redacted, local-only last-crash journal.
+10. Added concise/professional/detailed response styles.
+
+Existing strengths retained:
+- deterministic action parsing, approval cards and safety policies
+- encrypted memory stores and secret redaction
+- backups disabled and cleartext disabled by default
+- explicit screen-sharing and notification-access flows
+- offline wake word, Whisper and Piper assets
+
+Remaining limitations:
+- This is not a newly trained foundation model and cannot match the infrastructure of Siri, Alexa or Google Assistant.
+- Public distribution needs a backend proxy instead of direct cloud API keys.
+- Deprecated EncryptedSharedPreferences/MasterKey migration needs a dedicated future data-migration release.
+- Large UI/engine/service files should be modularized gradually rather than by one risky rewrite.
+- Physical Vivo instrumentation and long-duration wake/battery soak tests remain necessary.
+- Modern Android microphone foreground-service rules prevent reliable silent boot-time listening; open AURA after reboot.

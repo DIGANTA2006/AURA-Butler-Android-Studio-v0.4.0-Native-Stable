@@ -1,0 +1,14 @@
+AURA v0.9.0 test checklist
+
+1. Build and all unit tests pass.
+2. Existing memory/API keys survive update.
+3. Local commands work with all AI disabled.
+4. Local AI: run Start-AURA-Local-Brain.ps1 -PullModel, enable Local PC, ask a general question.
+5. Private-context sharing is off by default.
+6. Reject remote plain-HTTP local endpoints; accept localhost/127.0.0.1.
+7. Gemini fallback works when local server is stopped.
+8. Groq fallback works when selected/configured.
+9. Notification summary ignores injected instructions.
+10. Repeated model reply is deduplicated and Markdown is not spoken.
+11. AURA doctor reports route and crash-journal state.
+12. Wake, interruption, YouTube, news and weather regression tests.

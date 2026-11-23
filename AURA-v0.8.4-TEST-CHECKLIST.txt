@@ -1,0 +1,54 @@
+AURA v0.8.4 — Phone Test Checklist
+
+Preparation
+-----------
+1. Install v0.8.4 through Android Studio Run without uninstalling AURA.
+2. Confirm wake listening is enabled.
+3. Confirm microphone permission and unrestricted battery use.
+4. Set Whisper language to English for the first test.
+5. Keep media volume near 50–70 percent.
+
+Speech cleanup
+--------------
+1. Ask: "What is my battery percentage?"
+   PASS: AURA says "100 percent" or the current percentage.
+   FAIL: AURA says "asterisk", "underscore", "backtick", or "hash".
+2. Ask a question that produces a list.
+   PASS: bullets are spoken naturally, not as symbols.
+3. Ask a question containing a web link.
+   PASS: AURA does not read the complete raw URL aloud.
+
+Interrupt and replace
+---------------------
+1. Ask: "Explain data structures in detail."
+2. While AURA is speaking, say: "Hey Aura."
+3. Wait for the ready tone.
+4. Say: "What is my battery level?"
+   PASS: the explanation stops and the battery command is answered.
+   PASS: the old explanation does not continue afterward.
+
+Interrupt with no command
+-------------------------
+1. Ask AURA for a long explanation.
+2. While it speaks, say: "Aura."
+3. After the ready tone, remain silent.
+   PASS: AURA continues from near the unspoken portion.
+   FAIL: it restarts the entire answer or discards it.
+
+Explicit controls
+-----------------
+1. Interrupt and say: "Continue."
+   PASS: the previous answer resumes.
+2. Interrupt and say: "Stop talking."
+   PASS: the previous answer is discarded.
+3. Interrupt and say: "Go to sleep."
+   PASS: wake listening is disabled after acknowledgement.
+
+Self-echo
+---------
+Ask: "Who are you?"
+PASS: AURA does not interrupt itself merely because its answer contains "AURA".
+
+Logcat filter
+-------------
+AuraWakeService|AuraFastSystemTts|AuraVoiceManager|AndroidRuntime|FATAL EXCEPTION

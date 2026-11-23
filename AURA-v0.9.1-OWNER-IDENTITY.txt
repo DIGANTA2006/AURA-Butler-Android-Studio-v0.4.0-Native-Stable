@@ -1,0 +1,12 @@
+AURA v0.9.1 OWNER IDENTITY
+
+Fixes:
+- AURA now answers creator and developer questions locally before any cloud AI call.
+- Canonical full name: Autonomous Unified Response Assistant.
+- Canonical creator and owner: Diganta Chakraborty.
+- Adds a concise owner profile for direct questions such as "Tell me about me".
+- System prompts explicitly distinguish AURA's creator from Gemini, Groq, Qwen,
+  Gemma and OpenAI-compatible inference providers.
+- Adds regression tests for creator identity, owner profile and full-name expansion.
+
+This update does not change API keys, encrypted memory or provider settings.

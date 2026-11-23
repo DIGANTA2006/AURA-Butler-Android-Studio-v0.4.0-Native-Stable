@@ -1,0 +1,55 @@
+﻿AURA v0.10.0 dual-cloud + multilingual upgrade
+Generated: 2026-08-15 12:27:59
+Project: E:\MY PROJECT FOLDER\AURA PROJECT\AURA-Butler-Android-Studio-v0.4.0-Native-Stable
+Backup: E:\MY PROJECT FOLDER\AURA PROJECT\AURA-Butler-Android-Studio-v0.4.0-Native-Stable\.aura-upgrade-backup\20260815-122548
+
+Cloud routing installed:
+- Qwen3 8B: private text, coding, planning and tool-selection reasoning
+- Gemma 3 4B: private screenshot, image, OCR-assistance and UI analysis
+- Gemma is attempted first for approved images; Gemini remains an optional fallback
+- Modal cold-start allowance increased to 240 seconds
+
+Language/voice improvements:
+- Whisper language selection: Auto / English / Bengali / Hindi
+- Android TTS selects an installed English, Bengali or Hindi voice
+- Piper remains the offline English fallback
+- AURA/API/GPU/CPU/UI/OCR/AI/LLM pronunciation normalization
+- Common Bengali and Hindi device commands bridge to the deterministic local action engine
+
+Identity:
+AURA
+
+I was designed and developed by Diganta Chakraborty, my creator and owner. Diganta Chakraborty is AURA's creator, owner and primary developer. He is a B.Tech Computer Science and Engineering student at the College of Engineering & Management, Kolaghat, and is from Kadra, Chandrakona Road, West Bengal, India.
+
+Validation:
+PASS [static]: Wake word service
+PASS [static]: Whisper multilingual STT
+PASS [static]: Piper offline English fallback
+PASS [static]: English/Bengali/Hindi TTS routing
+PASS [static]: Encrypted settings/memory
+PASS [static]: Private Qwen3 8B reasoning
+PASS [static]: Private Gemma 3 4B vision
+PASS [static]: Screen/image preparation
+PASS [static]: Bengali/Hindi deterministic command bridge
+PASS [static]: Alarms/timers/reminders
+PASS [static]: Phone/device action safety
+PASS [static]: Weather/news/keyless tools
+PASS [static]: Analyzer pipeline
+PASS [static]: AURA doctor diagnostics
+Unit tests: PASS
+Debug build: PASS
+APK: E:\MY PROJECT FOLDER\AURA PROJECT\AURA-Butler-Android-Studio-v0.4.0-Native-Stable\AURA-v0.10.0-dual-cloud-multilingual-debug.apk
+
+IMPORTANT: Static checks prove that the feature implementation/assets are present; they cannot prove every Android hardware/service behavior. Test wake word, microphone, TTS, notifications, flashlight, calls/messages and background operation on the physical phone.
+
+One-time phone setup after install:
+1. Open AURA > Settings.
+2. Enable 'Use optional AI for complex or programming questions'.
+3. Set AI provider route to Automatic (recommended) or Private Qwen.
+4. Enable 'Use private Qwen AI'.
+5. Paste the SAME AURA_API_KEY value stored in your Modal 'aura-api-secret' into 'AURA cloud / private server token'. Never paste your Hugging Face token.
+6. Keep 'Use private Gemma screen vision' enabled. The endpoint/model are already filled in.
+7. Choose Whisper language Auto, Bengali, Hindi or English.
+8. Save Settings, then use 'Test AURA voice'.
+9. Test a normal Qwen question and then approve one screenshot for Gemma analysis.
+10. Run AURA Doctor and review PASS/WARN items.

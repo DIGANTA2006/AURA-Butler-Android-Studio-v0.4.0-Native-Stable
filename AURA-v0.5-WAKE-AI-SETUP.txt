@@ -1,0 +1,29 @@
+AURA v0.5 setup
+
+1. Build and install the updated app.
+2. Open AURA > Settings.
+3. Enable "Wake when I say Aura".
+4. Save while AURA is visible.
+5. Confirm the permanent notification says:
+   Listening for "Aura" or "Hey Aura"
+6. Say "Aura" clearly, wait for the tone, then speak the command.
+
+Optional Groq AI:
+1. Create a Groq API key in your GroqCloud project.
+2. Open AURA > Settings.
+3. Enable "Use Groq for complex or programming questions".
+4. Paste the key in the password field.
+5. Select Fast or Higher quality.
+6. Save settings.
+
+Local-first routing:
+- Wake word: offline
+- Whisper speech recognition: offline
+- Notes, memory, reminders, alarms and phone commands: offline
+- Weather, news and Wikipedia: keyless internet
+- Only unresolved general, complex or programming questions: Groq, when enabled
+
+The Groq key is not written into the source or APK. It is entered after installation
+and stored in AURA's encrypted preferences on that phone. Do not share a phone backup
+or debug data containing personal secrets. For public distribution, use a server proxy
+instead of a user API key inside a mobile app.

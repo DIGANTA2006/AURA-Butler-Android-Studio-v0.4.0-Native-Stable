@@ -1,0 +1,58 @@
+.idea/
+.gradle/
+**/build/
+local.properties
+*.iml
+*.apk
+*.aab
+*.hprof
+.java_pid*.hprof*
+*.log
+
+# Additional Android generated files
+**/.gradle/
+**/.idea/
+**/.kotlin/
+**/build/
+**/local.properties
+*.apk
+*.aab
+*.hprof
+*.log
+
+# Secrets and signing credentials
+.env
+.env.*
+!.env.example
+**/secrets.properties
+**/key.properties
+**/keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+**/service-account*.json
+**/firebase-adminsdk*.json
+
+# Local AURA backups
+/.aura-*-backup/
+/AURA-AUTOQA-*/
+/AURA-OWNER-CAL-*/
+/AURA-VOICE-SOURCE-*/
+/AURA-WAKE-REARM-DIAG-*/
+/_continuation_*/
+/_inspection_reports/
+/AURA-AUTOQA-REPORT-*.zip
+# Local backup files
+*.backup-*
+*.bak
+*.orig
+/-File
+/Fix-AURA-v0.14.3-Vision-Planner-Research (1).ps1
+/Fix-AURA-v0.15.3-DeepResearch-Visibility (1).ps1
+
+*.onnx
+*.aar
+_local_backups/

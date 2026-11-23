@@ -1,0 +1,124 @@
+AURA v0.6 MOBILE PRODUCTION CORE
+================================
+
+Purpose
+-------
+This update ports the production architecture of the user-provided Python
+AURA 8.2 project into the existing Android Studio AURA application. It is a
+mobile-native Kotlin implementation; Python is not bundled or executed on
+the phone.
+
+Ported from the Python architecture
+-----------------------------------
+1. Strict runtime state machine and safe state transitions.
+2. Trained local Naive Bayes intent router:
+   - 33 intent classes
+   - 287 training examples
+   - model bundled as an offline Android asset.
+3. Local-first orchestration:
+   - deterministic phone commands first
+   - encrypted personal memory second
+   - keyless weather/news/Wikipedia tools next
+   - optional Groq only for unresolved complex/general/programming requests.
+4. Encrypted searchable SQLite memory:
+   - values encrypted with Android Keystore AES-GCM
+   - retention and bounded record limits
+   - relevant-memory retrieval
+   - explicit "forget ..." support
+   - migration from older AURA memory.
+5. Secret detection and redaction:
+   - passwords, PINs, OTPs, card data, API keys and recovery phrases are
+     blocked from memory/cloud routing.
+6. Typed capability policy for potentially sensitive actions.
+7. Redacted rotating JSONL audit trail stored in private app storage.
+8. Bounded timeouts, retry policy and circuit breaker for optional AI.
+9. AURA Doctor diagnostics for voice assets, permissions, battery policy,
+   background heartbeat and optional AI configuration.
+10. Hardened wake service:
+   - dedicated microphone source for wake listening
+   - adaptive input gain
+   - low-level RMS/peak diagnostics
+   - 12 Aura/Hey Aura pronunciation patterns
+   - tuned keyword score and threshold
+   - Talk now notification action
+   - foreground microphone service and wake lock
+   - serialized native KWS, Whisper and TTS lifecycles.
+
+Intentionally not ported
+------------------------
+The following Python desktop features need separate Android-specific work,
+external hardware or larger models and are not falsely presented as complete:
+- desktop GUI/keyboard/mouse automation
+- robot integration
+- desktop administrator tools
+- Chroma vector database
+- desktop Ollama server integration
+- camera/image understanding
+- speaker biometrics
+- true full-duplex acoustic echo cancellation.
+
+Installation
+------------
+1. Keep this update script in the outer existing project folder.
+2. Run the script from PowerShell.
+3. Open the existing "android" folder in Android Studio.
+4. Use Build > Clean Project.
+5. Use Build > Assemble Project.
+6. Press Run to install the updated APK.
+
+First wake-word setup
+---------------------
+1. Open AURA while it is visible.
+2. Open AURA Settings.
+3. Enable "Wake when I say Aura".
+4. Save on-device settings.
+5. Confirm the permanent notification appears.
+6. Say "Aura" clearly. Wait for the tone, then speak the command.
+7. The notification action "Talk now" is a manual microphone/service test.
+
+Phone settings for Vivo
+-----------------------
+- Microphone: Allow
+- Notifications: Allow
+- Battery: Unrestricted / allow background activity
+- Autostart: Enabled
+- Do not Force stop the application.
+
+Useful diagnostic commands
+--------------------------
+- "Aura doctor"
+- "Run doctor"
+- "Wake status"
+- "Voice diagnostics"
+- "System health"
+
+Optional Groq
+-------------
+Groq is not required for wake word, Whisper, memory, reminders, phone
+commands, weather, news or Wikipedia.
+
+For unresolved complex/general/programming questions:
+1. Create your own Groq API key.
+2. Open AURA Settings.
+3. Enable the optional Groq switch.
+4. Paste your own key.
+5. Select:
+   - GPT-OSS 20B for faster answers
+   - GPT-OSS 120B for harder questions
+6. Save settings.
+
+The API key is not embedded in this update script or the APK. It is entered
+after installation and stored in the app's encrypted preferences. This direct
+personal-key design is appropriate for a private sideloaded app. A publicly
+distributed app should use a server-side proxy instead.
+
+Rollback
+--------
+Every run creates:
+  _backup_mobile_production_v06_yyyyMMdd_HHmmss
+
+Open that folder and run:
+  RESTORE-AURA-v0.6.ps1
+
+The rollback restores modified files and deletes only files that were newly
+created by this update.

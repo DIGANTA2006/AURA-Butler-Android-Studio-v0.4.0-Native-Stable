@@ -1,0 +1,16 @@
+AURA v0.9.0 Production Intelligence Foundation
+
+This release does not claim to train a Siri/Google-scale foundation model. It upgrades AURA into a safer hybrid personal-assistant architecture:
+- deterministic on-device actions and approval policy
+- encrypted memory
+- optional private OpenAI-compatible local brain
+- Gemini and Groq fallback
+- private-context sharing disabled by default
+- prompt-injection boundaries for analyzed data
+- bounded HTTP responses and endpoint validation
+- centralized professional butler behavior
+- response repetition/format quality gate
+- local-only crash journal
+- localhost-only cleartext exception for ADB reverse
+
+Recommended private PC model: qwen3:4b.

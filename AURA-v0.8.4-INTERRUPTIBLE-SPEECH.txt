@@ -1,0 +1,41 @@
+AURA v0.8.4 — Interruptible Speech
+
+Version code: 14
+Version name: 0.8.4-interruptible-speech
+
+Upgrade path
+------------
+This updater supersedes v0.8.3 and can be applied directly to either:
+- AURA v0.8.2-free-news-weather
+- AURA v0.8.3-command-reliability
+
+Purpose
+-------
+This release makes AURA's spoken replies natural and interruptible.
+
+Implemented
+-----------
+1. Removes Markdown and presentation symbols before speech:
+   - asterisks
+   - underscores
+   - backticks
+   - Markdown headings, bullets and links
+   - raw URLs are spoken as "the link"
+2. Cleans assistant text before it is stored or shown in the plain-text chat UI.
+3. Keeps a lightweight wake detector active while Android system TTS speaks.
+4. Saying "Aura" or "Hey Aura" interrupts the current reply immediately.
+5. After interruption, AURA plays the ready tone and listens for a new command.
+6. A valid new command replaces the unfinished reply and is executed.
+7. If no command is heard, AURA resumes from the approximate unspoken word.
+8. "Continue", "resume" and "carry on" resume the previous reply.
+9. "Stop talking", "be quiet" and "cancel speech" discard the previous reply.
+10. Ignores likely self-echo when AURA's own current sentence says its name.
+11. Piper remains the private fallback; barge-in is available through Android
+    system TTS on the target Vivo phone.
+
+Safety
+------
+- Wake-word and Whisper native runtimes remain serialized.
+- API keys are not changed or embedded.
+- Existing encrypted memory and settings are preserved.
+- The updater creates a timestamped backup and rollback script.

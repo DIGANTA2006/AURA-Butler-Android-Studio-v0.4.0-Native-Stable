@@ -1,0 +1,31 @@
+AURA v0.8.3 Command Reliability Test Checklist
+
+Before install
+1. Run the updater and confirm BUILD AND TESTS SUCCESSFUL.
+2. Install using Android Studio Run without uninstalling AURA.
+3. Keep Whisper language on English for the first test.
+4. Confirm the YouTube Data API key is saved in AURA Settings.
+
+Voice hallucination tests
+5. Tap the microphone and remain silent. AURA must say it did not hear enough speech; it must not generate Korean or Tamil text.
+6. Speak: What is my battery level?
+7. Speak: My battery level. AURA must answer locally without duplicated text.
+8. Speak: Open YouTube and play Patar Basori.
+9. Speak: Open your tube and play Patar Basori.
+10. Speak: Play Pasuri. AURA should understand Pasoori.
+11. Turn the screen off for two minutes and repeat one wake-word command.
+
+Typed command tests
+12. Type: open YouTube and play Patar Basori
+13. Type: open your tube and play Patar Basori
+14. Type: play Pasuri
+15. Type: what is my battery percentage
+16. Ask a general AI question and confirm literal ** markers are not shown.
+
+Expected behavior
+- Compound YouTube commands open a search result or exact watch URL, not only youtube.com.
+- A full command is never treated as an installed app name.
+- Silence and unsupported-script hallucinations are discarded.
+- English, Bengali and Hindi speech remain accepted.
+- No API key is logged.
+- Logcat tag AuraYouTubeResolver reports only redacted HTTP status or exception class.

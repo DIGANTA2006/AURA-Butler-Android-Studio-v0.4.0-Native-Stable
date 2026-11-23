@@ -1,0 +1,79 @@
+AURA v0.8.0 — ONE-BY-ONE TEST CHECKLIST
+
+Preparation
+[ ] Install over the existing AURA app; do not uninstall first.
+[ ] Enable microphone and notification permissions.
+[ ] In Analyzer, grant Notification Access.
+[ ] Enable Gemini only for detailed image/screen/cloud analysis.
+[ ] In Settings > Smart interaction, keep command correction enabled.
+
+A. Existing core
+[ ] Say “Aura”, then “open YouTube”.
+[ ] Type “please open Chrome”.
+[ ] Confirm existing Gemini/Groq keys and memory are preserved.
+
+B. Misspelled and incomplete commands
+[ ] “opep you tube” opens YouTube.
+[ ] “vollume to 40” sets media volume near 40%.
+[ ] “take screen shot” opens Android capture consent.
+[ ] “coolinig” prepares Cooling Assist.
+[ ] “catch clean” prepares safe AURA-cache cleanup.
+[ ] “sumarize wataop grop message” summarizes recent WhatsApp notifications.
+[ ] “translet onscren docoment to Bengali” prepares screen translation.
+
+C. Volume
+[ ] “set media volume to 40 percent”.
+[ ] “increase volume”.
+[ ] “mute media volume”, then “unmute media volume”.
+[ ] “set alarm volume to 60 percent”.
+[ ] “set ringtone volume to 30 percent”.
+
+D. Screenshot and screen document
+[ ] “take a screenshot”; approve one app/screen; verify Pictures/AURA.
+[ ] “read the text on screen”.
+[ ] “summarize the document on screen”.
+[ ] “translate the text on screen to Bengali”.
+[ ] “analyze this screen and explain the error”.
+[ ] Confirm unclear text is marked rather than invented.
+
+E. Thermal and Cooling Assist
+[ ] “what is my phone temperature”.
+[ ] “what is the thermal status”.
+[ ] “start cooling mode”; approve; verify Battery Saver settings open.
+[ ] Confirm AURA explains that hardware cooling is controlled by the phone.
+
+F. Cache
+[ ] “clean AURA cache”; approve; confirm memory/API keys remain.
+[ ] “clean cache”; confirm it clearly states only AURA temporary cache is cleaned.
+[ ] “clean YouTube cache”; confirm YouTube App Info opens for manual Clear cache.
+[ ] “open phone storage cleanup”; confirm Storage settings open where supported.
+
+G. Specific YouTube videos
+[ ] “play C programming pointers tutorial on YouTube”.
+[ ] “open YouTube specific video data structures lecture”.
+[ ] “YouTube DSA stack tutorial”.
+[ ] Paste a full https://youtu.be/... link and ask AURA to open it.
+[ ] Confirm the YouTube app is preferred when installed.
+
+H. WhatsApp groups
+[ ] Receive several new WhatsApp group notifications after access is enabled.
+[ ] “summarize WhatsApp messages”.
+[ ] “summarize WhatsApp group <group name>”.
+[ ] Confirm sender names and group title are separated.
+[ ] Lock the phone and ask again; confirm private text is hidden until unlocked.
+
+I. Personality
+[ ] Settings > Smart interaction > Banter level > Subtle.
+[ ] Run normal app, volume, screenshot and cache commands.
+[ ] Set level to Playful and confirm occasional dry-butler remarks.
+[ ] Ask for an urgent/payment/security notification summary and confirm no joke is added.
+[ ] Disable banter and confirm replies remain fully direct.
+
+J. Stability
+[ ] Test foreground commands.
+[ ] Press Home and test wake-word background commands.
+[ ] Reboot phone, open AURA and re-enable the wake service if needed.
+[ ] Confirm no crash, ANR or repeated microphone failure.
+
+Useful Logcat filter
+AuraActionExecutor|AuraBackgroundAction|AuraWakeService|AuraNotificationListener|AuraScreenCapture|AndroidRuntime|FATAL EXCEPTION

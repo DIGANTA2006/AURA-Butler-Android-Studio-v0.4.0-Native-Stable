@@ -1,0 +1,18 @@
+AURA v0.14 Agent + RAG + Streaming
+Completed: 2026-08-16T08:22:45.1077020+05:30
+Android: E:\MY PROJECT FOLDER\AURA PROJECT\AURA-Butler-Android-Studio-v0.4.0-Native-Stable
+Cloud: E:\MY PROJECT FOLDER\AURA CLOUD
+GPU: T4
+Warm seconds: 45
+Daily limits: text=12 vision=6 research=2 auxiliary=4 research_step=8
+Modal deployed: False
+Build skipped: False
+Backup: .aura-v0.14-backup\20260816-082226
+
+Important acceptance tests:
+1. Attach a PDF from Butler chat and ask for a summary.
+2. Ask a follow-up question about the attached document (enable AI private context if you want Qwen to receive retrieved memory chunks).
+3. Ask a normal Qwen question and verify text appears progressively.
+4. Ask: Set a 10 minute timer, then open YouTube, then tell me the weather.
+5. Approve screen analysis; AURA should move behind the target app and wait about five seconds before the one-shot capture.
+6. Test Gemma after a cold start and Deep Research after deployment.

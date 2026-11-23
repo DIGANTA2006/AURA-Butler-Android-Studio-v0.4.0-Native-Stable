@@ -1,0 +1,13 @@
+AURA v0.8.3 Command Reliability
+
+Fixes:
+- Stops Whisper from transcribing silence as Korean, Tamil or other unsupported scripts.
+- Rejects unsupported-script hallucinations in Auto speech mode.
+- Preserves English, Bengali and Hindi transcripts.
+- Collapses duplicated voice transcripts such as "my battery level is my battery level".
+- Understands "open YouTube and play <title>" and similar compound commands.
+- Corrects "your tube", "you tube", "u tube" and "you toob" to YouTube.
+- Prevents the generic app opener from treating a full compound command as an app name.
+- Recognizes battery-level and battery-percentage phrases locally.
+- Removes literal Markdown bold/heading markers from optional AI replies.
+- Adds redacted YouTube resolver diagnostics without logging API keys.

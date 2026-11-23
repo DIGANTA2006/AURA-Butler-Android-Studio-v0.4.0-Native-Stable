@@ -1,0 +1,16 @@
+﻿AURA v0.12.1 audited-stable correction
+Date: 2026-08-15 22:34:09
+Android patched: 16
+Android already current: 0
+Cloud patch state: patched
+Cloud deployment skipped: False
+Android build skipped: False
+Build succeeded: True
+
+Corrections:
+- Gemma uses trusted Modal 303 result redirects for long cold starts.
+- Qwen thinking is hidden at token level in Modal and stripped again on Android.
+- Qwen thinking sampling aligns with the official Qwen3 recommendation.
+- Research source downloads are bounded while streaming, before parser allocation.
+- Provider user-agent/version labels are consistent.
+- README and audit notes describe the current architecture and platform boundaries.

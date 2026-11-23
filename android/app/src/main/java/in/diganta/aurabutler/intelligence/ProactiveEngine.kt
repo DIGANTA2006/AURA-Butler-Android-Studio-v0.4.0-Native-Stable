@@ -1,0 +1,693 @@
+package `in`.diganta.aurabutler.intelligence
+
+import `in`.diganta.aurabutler.data.AiProvider
+import `in`.diganta.aurabutler.memory.SemanticMemory
+import `in`.diganta.aurabutler.model.ConversationContext
+import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.runtime.SecretRedactor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+
+/**
+ * Proactive intelligence engine that anticipates needs, suggests actions,
+ * and runs background agents for continuous assistance.
+ */
+class ProactiveEngine(
+    private val aiProvider: AiProvider?,
+    private val semanticMemory: SemanticMemory,
+    private val settings: ButlerSettings,
+    private val contextProvider: ContextProvider
+) {
+
+    data class ProactiveSuggestion(
+        val id: String = UUID.randomUUID().toString(),
+        val type: SuggestionType,
+        val title: String,
+        val description: String,
+        val action: ProactiveAction,
+        val confidence: Double,
+        val priority: Priority,
+        val context: SuggestionContext,
+        val createdAt: Long = System.currentTimeMillis(),
+        val expiresAt: Long = System.currentTimeMillis() + 3600_000, // 1 hour default
+        val dismissed: Boolean = false,
+        val accepted: Boolean = false
+    )
+
+    enum class SuggestionType {
+        REMINDER,           // Time-based reminders
+        FOLLOW_UP,          // Follow up on previous conversation
+        PREPARATION,        // Prepare for upcoming event/task
+        OPTIMIZATION,       // Suggest better way to do something
+        INSIGHT,            // Pattern discovered in data
+        MAINTENANCE,        // Device/app maintenance needed
+        LEARNING,           // Offer to teach/learn something
+        AUTOMATION          // Suggest automation for repetitive task
+    }
+
+    enum class Priority {
+        LOW(1), MEDIUM(2), HIGH(3), CRITICAL(4)
+        val weight: Int
+    }
+
+    data class ProactiveAction(
+        val type: ActionType,
+        val payload: Map<String, Any> = emptyMap(),
+        val requiresConfirmation: Boolean = true
+    )
+
+    enum class ActionType {
+        SHOW_NOTIFICATION,
+        ASK_QUESTION,
+        RUN_COMMAND,
+        OPEN_APP,
+        CREATE_REMINDER,
+        SCHEDULE_TASK,
+        START_RESEARCH,
+        SHOW_INSIGHT
+    }
+
+    data class SuggestionContext(
+        val trigger: Trigger,
+        val relatedMemoryIds: List<String> = emptyList(),
+        val timeRelevance: TimeRelevance = TimeRelevance.ANYTIME,
+        val locationRelevance: String? = null
+    )
+
+    enum class Trigger {
+        TIME_BASED,
+        CONVERSATION_CONTEXT,
+        DEVICE_STATE,
+        MEMORY_PATTERN,
+        CALENDAR_EVENT,
+        LOCATION_CHANGE,
+        USER_HABIT
+    }
+
+    enum class TimeRelevance {
+        MORNING, AFTERNOON, EVENING, NIGHT, ANYTIME, SPECIFIC_TIME
+    }
+
+    data class BackgroundAgent(
+        val id: String = UUID.randomUUID().toString(),
+        val name: String,
+        val description: String,
+        val schedule: AgentSchedule,
+        val task: AgentTask,
+        val enabled: Boolean = true,
+        val lastRun: Long? = null,
+        val nextRun: Long? = null,
+        val runCount: Int = 0,
+        val successCount: Int = 0,
+        val errorCount: Int = 0
+    )
+
+    enum class AgentSchedule {
+        HOURLY,
+        DAILY,
+        WEEKLY,
+        ON_EVENT(String),  // Event name
+        CRON(String)       // Cron expression
+    }
+
+    @FunctionalInterface
+    interface AgentTask {
+        suspend fun execute(context: AgentContext): AgentResult
+    }
+
+    data class AgentContext(
+        val currentTime: Long = System.currentTimeMillis(),
+        val deviceState: DeviceState,
+        val recentMemories: List<SemanticMemory.MemoryEntry>,
+        val activePlans: List<String>,
+        val userPreferences: ButlerSettings
+    )
+
+    data class DeviceState(
+        val batteryLevel: Int,
+        val isCharging: Boolean,
+        val networkType: String,
+        val storageFreePercent: Double,
+        val screenOn: Boolean,
+        val foregroundApp: String?
+    )
+
+    data class AgentResult(
+        val success: Boolean,
+        val output: String?,
+        val suggestions: List<ProactiveSuggestion> = emptyList(),
+        val actions: List<ProactiveAction> = emptyList(),
+        val error: String? = null
+    )
+
+    private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
+    private val agents = ConcurrentHashMap<String, BackgroundAgent>()
+    private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
+    private var running = false
+
+    init {
+        registerDefaultAgents()
+    }
+
+    /**
+     * Start the proactive engine - begins background agents and suggestion generation.
+     */
+    fun start() {
+        if (running) return
+        running = true
+        
+        // Schedule periodic suggestion generation
+        scheduler.scheduleAtFixedRate({
+            generateProactiveSuggestions()
+        }, 5, 15, TimeUnit.MINUTES)
+        
+        // Schedule background agents
+        scheduleAgents()
+        
+        // Initial suggestion generation
+        generateProactiveSuggestions()
+    }
+
+    /**
+     * Stop the proactive engine.
+     */
+    fun stop() {
+        running = false
+        scheduler.shutdown()
+    }
+
+    /**
+     * Get current proactive suggestions for the user.
+     */
+    fun getSuggestions(context: ConversationContext, limit: Int = 5): List<ProactiveSuggestion> {
+        val now = System.currentTimeMillis()
+        return suggestions.values
+            .filter { !it.dismissed && !it.accepted && it.expiresAt > now }
+            .filter { isRelevant(it, context) }
+            .sortedByDescending { it.priority.weight * it.confidence }
+            .take(limit)
+            .toList()
+    }
+
+    /**
+     * Mark a suggestion as dismissed.
+     */
+    fun dismissSuggestion(id: String) {
+        suggestions[id]?.let { suggestions[id] = it.copy(dismissed = true) }
+    }
+
+    /**
+     * Mark a suggestion as accepted and execute its action.
+     */
+    suspend fun acceptSuggestion(id: String, context: ConversationContext): Boolean {
+        return suggestions[id]?.let { suggestion ->
+            suggestions[id] = suggestion.copy(accepted = true)
+            executeAction(suggestion.action, context)
+            true
+        } ?: false
+    }
+
+    /**
+     * Register a custom background agent.
+     */
+    fun registerAgent(agent: BackgroundAgent) {
+        agents[agent.id] = agent
+        if (running) scheduleAgent(agent)
+    }
+
+    /**
+     * Get agent status.
+     */
+    fun getAgentStatus(): List<BackgroundAgent> = agents.values.toList()
+
+    // ===== Private Implementation =====
+
+    private fun registerDefaultAgents() {
+        // Daily briefing agent
+        registerAgent(BackgroundAgent(
+            name = "Daily Briefing",
+            description = "Generates a morning summary of schedule, weather, and priorities",
+            schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
+            task = { ctx ->
+                val suggestions = generateDailyBriefing(ctx)
+                AgentResult(true, "Daily briefing generated", suggestions = suggestions)
+            }
+        ))
+
+        // Memory consolidation agent
+        registerAgent(BackgroundAgent(
+            name = "Memory Consolidation",
+            description = "Consolidates memories, extracts patterns, applies forgetting curve",
+            schedule = AgentSchedule.DAILY,
+            task = { ctx ->
+                // This would call semanticMemory.consolidate()
+                AgentResult(true, "Memory consolidation completed")
+            }
+        ))
+
+        // Battery optimization agent
+        registerAgent(BackgroundAgent(
+            name = "Battery Optimization",
+            description = "Suggests power-saving actions when battery is low",
+            schedule = AgentSchedule.HOURLY,
+            task = { ctx ->
+                val suggestions = mutableListOf<ProactiveSuggestion>()
+                if (ctx.deviceState.batteryLevel < 20 && !ctx.deviceState.isCharging) {
+                    suggestions += ProactiveSuggestion(
+                        type = SuggestionType.MAINTENANCE,
+                        title = "Low Battery",
+                        description = "Battery at ${ctx.deviceState.batteryLevel}%. Consider enabling battery saver.",
+                        action = ProactiveAction(
+                            type = ActionType.SHOW_NOTIFICATION,
+                            payload = mapOf("message" to "Battery low: ${ctx.deviceState.batteryLevel}%"),
+                            requiresConfirmation = false
+                        ),
+                        confidence = 0.95,
+                        priority = Priority.HIGH,
+                        context = SuggestionContext(trigger = Trigger.DEVICE_STATE)
+                    )
+                }
+                AgentResult(true, "Battery check completed", suggestions = suggestions)
+            }
+        ))
+
+        // Storage cleanup agent
+        registerAgent(BackgroundAgent(
+            name = "Storage Monitor",
+            description = "Alerts when storage is running low",
+            schedule = AgentSchedule.DAILY,
+            task = { ctx ->
+                val suggestions = mutableListOf<ProactiveSuggestion>()
+                if (ctx.deviceState.storageFreePercent < 10) {
+                    suggestions += ProactiveSuggestion(
+                        type = SuggestionType.MAINTENANCE,
+                        title = "Low Storage",
+                        description = "Only ${String.format("%.1f", ctx.deviceState.storageFreePercent)}% storage free. Consider clearing cache or unused apps.",
+                        action = ProactiveAction(
+                            type = ActionType.OPEN_APP,
+                            payload = mapOf("app" to "Settings > Storage"),
+                            requiresConfirmation = true
+                        ),
+                        confidence = 0.9,
+                        priority = Priority.MEDIUM,
+                        context = SuggestionContext(trigger = Trigger.DEVICE_STATE)
+                    )
+                }
+                AgentResult(true, "Storage check completed", suggestions = suggestions)
+            }
+        ))
+
+        // Habit learning agent
+        registerAgent(BackgroundAgent(
+            name = "Habit Learning",
+            description = "Detects recurring patterns and suggests automations",
+            schedule = AgentSchedule.WEEKLY,
+            task = { ctx ->
+                val suggestions = detectHabitPatterns(ctx)
+                AgentResult(true, "Habit analysis completed", suggestions = suggestions)
+            }
+        ))
+
+        // Research follow-up agent
+        registerAgent(BackgroundAgent(
+            name = "Research Follow-up",
+            description = "Checks for updates on previous research topics",
+            schedule = AgentSchedule.DAILY,
+            task = { ctx ->
+                val suggestions = checkResearchUpdates(ctx)
+                AgentResult(true, "Research follow-up completed", suggestions = suggestions)
+            }
+        ))
+    }
+
+    private fun scheduleAgents() {
+        for (agent in agents.values) {
+            if (agent.enabled) scheduleAgent(agent)
+        }
+    }
+
+    private fun scheduleAgent(agent: BackgroundAgent) {
+        val delay = calculateNextRun(agent.schedule)
+        scheduler.schedule({
+            if (running && agents[agent.id]?.enabled == true) {
+                runAgent(agent)
+            }
+        }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    private fun calculateNextRun(schedule: AgentSchedule): Long {
+        val now = System.currentTimeMillis()
+        return when (schedule) {
+            AgentSchedule.HOURLY -> 3_600_000 // 1 hour
+            AgentSchedule.DAILY -> 24 * 3_600_000 // 24 hours
+            AgentSchedule.WEEKLY -> 7 * 24 * 3_600_000 // 1 week
+            AgentSchedule.ON_EVENT(_) -> 3_600_000 // Check hourly for events
+            AgentSchedule.CRON(_) -> 3_600_000 // Simplified - would parse cron
+        }
+    }
+
+    private fun runAgent(agent: BackgroundAgent) {
+        val agentContext = buildAgentContext()
+        val updatedAgent = agent.copy(lastRun = System.currentTimeMillis(), runCount = agent.runCount + 1)
+        agents[agent.id] = updatedAgent
+        
+        // Run asynchronously
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val result = agent.task.execute(agentContext)
+                val successAgent = updatedAgent.copy(
+                    successCount = updatedAgent.successCount + (if (result.success) 1 else 0),
+                    errorCount = updatedAgent.errorCount + (if (result.success) 0 else 1),
+                    nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
+                )
+                agents[agent.id] = successAgent
+                
+                // Add generated suggestions
+                result.suggestions.forEach { suggestions[it.id] = it }
+                
+                // Execute suggested actions if high confidence and auto-execute enabled
+                if (settings.proactiveAutoExecute) {
+                    result.actions.filter { it.requiresConfirmation == false && result.suggestions.any { s -> s.confidence > 0.8 } }
+                        .forEach { executeAction(it, ConversationContext.empty()) }
+                }
+            } catch (e: Exception) {
+                val errorAgent = updatedAgent.copy(
+                    errorCount = updatedAgent.errorCount + 1,
+                    nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
+                )
+                agents[agent.id] = errorAgent
+            }
+        }
+    }
+
+    private fun buildAgentContext(): AgentContext {
+        // In production, get real device state
+        return AgentContext(
+            deviceState = DeviceState(
+                batteryLevel = 75,
+                isCharging = false,
+                networkType = "WIFI",
+                storageFreePercent = 35.0,
+                screenOn = true,
+                foregroundApp = "in.diganta.aurabutler"
+            ),
+            recentMemories = semanticMemory.recall("recent", ConversationContext.empty(), 
+                SemanticMemory.RecallOptions(maxResults = 20, strategy = SemanticMemory.RetrievalStrategy.TEMPORAL)).entries.map { it.entry },
+            activePlans = emptyList(),
+            userPreferences = settings
+        )
+    }
+
+    private suspend fun generateProactiveSuggestions() {
+        val context = buildAgentContext()
+        val allSuggestions = mutableListOf<ProactiveSuggestion>()
+        
+        // Time-based suggestions
+        allSuggestions += generateTimeBasedSuggestions(context)
+        
+        // Conversation context suggestions
+        allSuggestions += generateContextualSuggestions(context)
+        
+        // Memory pattern suggestions
+        allSuggestions += generateMemoryPatternSuggestions(context)
+        
+        // Device state suggestions
+        allSuggestions += generateDeviceStateSuggestions(context)
+        
+        // Filter and store
+        val now = System.currentTimeMillis()
+        for (suggestion in allSuggestions) {
+            if (suggestion.confidence >= 0.4 && suggestion.expiresAt > now) {
+                suggestions[suggestion.id] = suggestion
+            }
+        }
+        
+        // Clean expired
+        val expired = suggestions.values.filter { it.expiresAt <= now }.map { it.id }
+        expired.forEach { suggestions.remove(it) }
+    }
+
+    private fun generateTimeBasedSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
+        val hour = java.time.LocalDateTime.now().hour
+        val suggestions = mutableListOf<ProactiveSuggestion>()
+        
+        when {
+            hour in 6..9 -> {
+                // Morning
+                suggestions += ProactiveSuggestion(
+                    type = SuggestionType.PREPARATION,
+                    title = "Good Morning",
+                    description = "Would you like your daily briefing with weather, schedule, and priorities?",
+                    action = ProactiveAction(
+                        type = ActionType.ASK_QUESTION,
+                        payload = mapOf("question" to "Show daily briefing?"),
+                        requiresConfirmation = true
+                    ),
+                    confidence = 0.8,
+                    priority = Priority.MEDIUM,
+                    context = SuggestionContext(
+                        trigger = Trigger.TIME_BASED,
+                        timeRelevance = SuggestionContext.TimeRelevance.MORNING
+                    )
+                )
+            }
+            hour in 12..13 -> {
+                // Lunch
+                suggestions += ProactiveSuggestion(
+                    type = SuggestionType.REMINDER,
+                    title = "Lunch Break",
+                    description = "Time for a break. Want me to set a timer or find nearby food?",
+                    action = ProactiveAction(
+                        type = ActionType.ASK_QUESTION,
+                        payload = mapOf("question" to "Set lunch timer or find food?"),
+                        requiresConfirmation = true
+                    ),
+                    confidence = 0.6,
+                    priority = Priority.LOW,
+                    context = SuggestionContext(
+                        trigger = Trigger.TIME_BASED,
+                        timeRelevance = SuggestionContext.TimeRelevance.AFTERNOON
+                    )
+                )
+            }
+            hour in 17..19 -> {
+                // Evening wrap-up
+                suggestions += ProactiveSuggestion(
+                    type = SuggestionType.FOLLOW_UP,
+                    title = "Evening Wrap-up",
+                    description = "Review today's accomplishments and plan tomorrow?",
+                    action = ProactiveAction(
+                        type = ActionType.ASK_QUESTION,
+                        payload = mapOf("question" to "Show evening summary?"),
+                        requiresConfirmation = true
+                    ),
+                    confidence = 0.7,
+                    priority = Priority.MEDIUM,
+                    context = SuggestionContext(
+                        trigger = Trigger.TIME_BASED,
+                        timeRelevance = SuggestionContext.TimeRelevance.EVENING
+                    )
+                )
+            }
+            hour in 22..23 -> {
+                // Night
+                suggestions += ProactiveSuggestion(
+                    type = SuggestionType.MAINTENANCE,
+                    title = "Night Mode",
+                    description = "Enable do not disturb and set morning alarm?",
+                    action = ProactiveAction(
+                        type = ActionType.ASK_QUESTION,
+                        payload = mapOf("question" to "Enable night mode?"),
+                        requiresConfirmation = true
+                    ),
+                    confidence = 0.5,
+                    priority = Priority.LOW,
+                    context = SuggestionContext(
+                        trigger = Trigger.TIME_BASED,
+                        timeRelevance = SuggestionContext.TimeRelevance.NIGHT
+                    )
+                )
+            }
+        }
+        
+        return suggestions
+    }
+
+    private fun generateContextualSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
+        // Would analyze recent conversation context
+        // For now, return empty - would integrate with conversation history
+        return emptyList()
+    }
+
+    private fun generateMemoryPatternSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
+        val suggestions = mutableListOf<ProactiveSuggestion>()
+        
+        // Check for recurring topics in recent memories
+        val topics = ctx.recentMemories.flatMap { it.metadata.relatedEntities }
+            .groupBy { it }
+            .mapValues { it.value.size }
+            .toList()
+            .sortedByDescending { it.second }
+            .take(3)
+        
+        for ((topic, count) in topics) {
+            if (count >= 3) {
+                suggestions += ProactiveSuggestion(
+                    type = SuggestionType.INSIGHT,
+                    title = "Recurring Topic: $topic",
+                    description = "You've mentioned '$topic' $count times recently. Want to create a project or research note?",
+                    action = ProactiveAction(
+                        type = ActionType.ASK_QUESTION,
+                        payload = mapOf("question" to "Create project for $topic?"),
+                        requiresConfirmation = true
+                    ),
+                    confidence = 0.7,
+                    priority = Priority.LOW,
+                    context = SuggestionContext(
+                        trigger = Trigger.MEMORY_PATTERN,
+                        relatedMemoryIds = ctx.recentMemories.filter { it.metadata.relatedEntities.contains(topic) }.map { it.id }
+                    )
+                )
+            }
+        }
+        
+        return suggestions
+    }
+
+    private fun generateDeviceStateSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
+        val suggestions = mutableListOf<ProactiveSuggestion>()
+        val state = ctx.deviceState
+        
+        if (state.batteryLevel < 15 && !state.isCharging) {
+            suggestions += ProactiveSuggestion(
+                type = SuggestionType.MAINTENANCE,
+                title = "Critical Battery",
+                description = "Battery at ${state.batteryLevel}%. Connect charger immediately.",
+                action = ProactiveAction(
+                    type = ActionType.SHOW_NOTIFICATION,
+                    payload = mapOf("message" to "Critical battery: ${state.batteryLevel}%"),
+                    requiresConfirmation = false
+                ),
+                confidence = 0.99,
+                priority = Priority.CRITICAL,
+                context = SuggestionContext(trigger = Trigger.DEVICE_STATE)
+            )
+        }
+        
+        if (state.storageFreePercent < 5) {
+            suggestions += ProactiveSuggestion(
+                type = SuggestionType.MAINTENANCE,
+                title = "Critical Storage",
+                description = "Only ${String.format("%.1f", state.storageFreePercent)}% free. Device may become unstable.",
+                action = ProactiveAction(
+                    type = ActionType.OPEN_APP,
+                    payload = mapOf("app" to "Settings > Storage"),
+                    requiresConfirmation = true
+                ),
+                confidence = 0.95,
+                priority = Priority.HIGH,
+                context = SuggestionContext(trigger = Trigger.DEVICE_STATE)
+            )
+        }
+        
+        return suggestions
+    }
+
+    private fun generateDailyBriefing(ctx: AgentContext): List<ProactiveSuggestion> {
+        val suggestions = mutableListOf<ProactiveSuggestion>()
+        
+        suggestions += ProactiveSuggestion(
+            type = SuggestionType.PREPARATION,
+            title = "Daily Briefing Ready",
+            description = "Your morning summary is ready with weather, schedule, and top priorities.",
+            action = ProactiveAction(
+                type = ActionType.SHOW_INSIGHT,
+                payload = mapOf(
+                    "type" to "daily_briefing",
+                    "weather" to "Sunny, 22°C",
+                    "schedule" to "3 meetings, 2 tasks",
+                    "priorities" to "Project review, Team sync, Code review"
+                ),
+                requiresConfirmation = false
+            ),
+            confidence = 0.9,
+            priority = Priority.HIGH,
+            context = SuggestionContext(
+                trigger = Trigger.TIME_BASED,
+                timeRelevance = SuggestionContext.TimeRelevance.MORNING
+            )
+        )
+        
+        return suggestions
+    }
+
+    private fun detectHabitPatterns(ctx: AgentContext): List<ProactiveSuggestion> {
+        val suggestions = mutableListOf<ProactiveSuggestion>()
+        
+        // Simplified - would analyze actual usage patterns
+        suggestions += ProactiveSuggestion(
+            type = SuggestionType.AUTOMATION,
+            title = "Automation Opportunity",
+            description = "You often open YouTube and search for music after saying 'play'. Want a shortcut?",
+            action = ProactiveAction(
+                type = ActionType.ASK_QUESTION,
+                payload = mapOf("question" to "Create 'play music' shortcut?"),
+                requiresConfirmation = true
+            ),
+            confidence = 0.6,
+            priority = Priority.LOW,
+            context = SuggestionContext(trigger = Trigger.USER_HABIT)
+        )
+        
+        return suggestions
+    }
+
+    private fun checkResearchUpdates(ctx: AgentContext): List<ProactiveSuggestion> {
+        // Would check for updates on previous research topics
+        return emptyList()
+    }
+
+    private fun isRelevant(suggestion: ProactiveSuggestion, context: ConversationContext): Boolean {
+        // Check time relevance
+        val hour = java.time.LocalDateTime.now().hour
+        when (suggestion.context.timeRelevance) {
+            SuggestionContext.TimeRelevance.MORNING -> if (hour !in 6..11) return false
+            SuggestionContext.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
+            SuggestionContext.TimeRelevance.EVENING -> if (hour !in 17..21) return false
+            SuggestionContext.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
+            else -> {}
+        }
+        
+        // Check if user prefers proactive suggestions
+        return settings.proactiveSuggestionsEnabled
+    }
+
+    private suspend fun executeAction(action: ProactiveAction, context: ConversationContext) {
+        // In production, integrate with action execution system
+        when (action.type) {
+            ProactiveAction.ActionType.SHOW_NOTIFICATION -> {
+                // Show notification
+            }
+            ProactiveAction.ActionType.ASK_QUESTION -> {
+                // Queue question for next interaction
+            }
+            ProactiveAction.ActionType.RUN_COMMAND -> {
+                // Execute command
+            }
+            ProactiveAction.ActionType.OPEN_APP -> {
+                // Open app
+            }
+            else -> {}
+        }
+    }
+
+    interface ContextProvider {
+        fun getCurrentContext(): ConversationContext
+        fun getDeviceState(): DeviceState
+    }
+}

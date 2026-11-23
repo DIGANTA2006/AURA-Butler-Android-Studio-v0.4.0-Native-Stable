@@ -1,0 +1,45 @@
+AURA v0.8.1 SMART AUTOPLAY
+
+Version code: 11
+Version name: 0.8.1-smart-autoplay
+
+FEATURES
+1. Generic playback commands default to YouTube:
+   - Play Pasoori
+   - Play Shape of You
+   - Listen to Kesariya
+   - Put on Bengali romantic songs
+2. Local correction handles known command and title mistakes such as
+   Pasuri -> Pasoori.
+3. Optional Gemini command repair corrects short uncertain commands without
+   executing them.
+4. Exact YouTube playback uses the official YouTube Data API search endpoint
+   to resolve a video ID.
+5. Result ranking prefers complete title matches and official channels while
+   penalizing covers, reactions, karaoke, remixes, slowed/reverb, live
+   variants, and Shorts unless requested.
+6. Android opens the exact watch URL in the YouTube app. YouTube may still
+   show ads, consent, age restrictions, or network errors.
+7. Safe fallback opens YouTube search results when:
+   - no YouTube API key is configured,
+   - the API is unavailable,
+   - quota is exhausted,
+   - confidence is insufficient.
+8. YouTube and Gemini keys remain encrypted in AURA settings and are not
+   embedded in the APK.
+9. Includes the v0.8.0 BatterySaver icon compile repair.
+
+SETUP
+- Enable YouTube Data API v3 in a Google Cloud project.
+- Put the project API key into:
+  AURA Settings > Smart interaction > YouTube Data API key.
+- Enable Optional AI and enter a Gemini API key for AI command repair.
+- Enable Automatically play exact YouTube result.
+
+PRIVACY AND SAFETY
+- Only short action-like commands are eligible for AI wording repair.
+- Passwords, OTPs, API keys, URLs, and sensitive text are not sent for repair.
+- Repaired commands still pass through AURA's deterministic parser and local
+  action safety policy.
+- AURA never invents recipients, phone numbers, payments, deletions, or
+  messages.

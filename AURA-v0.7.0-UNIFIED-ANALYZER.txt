@@ -1,0 +1,77 @@
+AURA v0.7.0 — Unified Analyzer
+================================
+
+Version code: 9
+Upgrade base: AURA v0.6.2 App Control
+
+INSTALLED PHONE-SIDE CAPABILITIES
+---------------------------------
+1. Notification Analyzer
+   - Android Notification Access integration.
+   - Encrypted, bounded local notification vault.
+   - WhatsApp, Gmail/mail, Slack, Jira, SMS and messaging classification.
+   - Important/critical notification scoring.
+   - Local summaries while the phone is unlocked.
+   - Private counts-only results while the phone is locked.
+   - Optional Gemini summaries only when Cloud Analyzer Summaries is enabled.
+   - Secret-like text is redacted before optional cloud summarization.
+   - Automatic retention from 1 to 30 days and manual Delete History control.
+
+2. Proactive Assistance
+   - Counts-only alerts for locally classified important notifications.
+   - A 12-hour WorkManager digest for important notifications.
+   - Suggested actions remain proposals; messages, mail, purchases and calendar
+     writes still require approval.
+
+3. Screen and Image Analyzer
+   - User-selected gallery image analysis.
+   - One-shot Android MediaProjection screen capture.
+   - Android asks for screen-sharing permission for every screen capture.
+   - Captured screen file is removed after loading.
+   - Images are resized/compressed and sent only after explicit approval.
+
+4. Detailed News and Deep Research
+   - Keyless Google News RSS mode with headline, source and publication time.
+   - Optional Gemini Google Search grounding for researched context and sources.
+   - Detailed news format: headline, explanation, why it matters, what to watch.
+
+5. Song Finder
+   - Opens the installed Google/system song-identification experience.
+   - Falls back to Google web song search when no direct activity is available.
+
+6. Persistent Memory
+   - Existing encrypted current-fact memory remains the fast memory layer.
+   - New encrypted temporal history records previous versions when facts change.
+   - Commands such as “memory history” can retrieve matching past versions.
+
+7. Unified UI and Voice Commands
+   - New Analyzer tab.
+   - Notification Access status and encrypted item count.
+   - Buttons for WhatsApp/mail/important digest, screen/image analysis, song
+     identification, detailed news and deep research.
+   - Settings for local/cloud analysis, proactive alerts, scheduled digests,
+     retention, screen analysis, research and temporal memory.
+
+IMPORTANT PLATFORM BOUNDARIES
+-----------------------------
+- WhatsApp: AURA can summarize notification previews received after Notification
+  Access is granted. It does not bypass WhatsApp encryption or read old chats
+  directly from WhatsApp's private database.
+- Gmail: this build summarizes Gmail notification previews. Complete historical
+  mailbox search requires a separately configured Google OAuth client and Gmail
+  API scopes. AURA never asks for a Gmail password.
+- Slack and Jira: notification previews are supported. Full autonomous API
+  workflows require separately configured OAuth/service credentials.
+- Screen/camera: no hidden continuous capture. Screen and image analysis is
+  explicitly user-triggered.
+- Song recognition: delegated to the installed system/Google recognition UI;
+  this APK does not include a commercial audio-fingerprint catalogue.
+- Scheduled jobs are battery-aware and Android may delay their exact execution.
+
+PRIVACY DEFAULTS
+----------------
+- Notification history is encrypted with a non-exportable Android Keystore key.
+- Cloud notification summaries are OFF by default.
+- Sensitive-looking values are redacted before storage/cloud processing.
+- Phone-lock summaries hide notification message contents.
+- No account password is requested or stored.

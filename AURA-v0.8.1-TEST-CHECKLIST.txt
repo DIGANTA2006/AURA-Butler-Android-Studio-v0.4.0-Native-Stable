@@ -1,0 +1,60 @@
+AURA v0.8.1 SMART AUTOPLAY TEST CHECKLIST
+
+PREPARATION
+[ ] Build succeeds.
+[ ] Install over the existing AURA app; do not uninstall.
+[ ] Open Settings > Optional AI and confirm the Gemini key if AI repair is
+    desired.
+[ ] Open Settings > Smart interaction.
+[ ] Enable Correct command spelling.
+[ ] Enable AI command repair.
+[ ] Enable Automatically play exact YouTube result.
+[ ] Enter a YouTube Data API key with YouTube Data API v3 enabled.
+[ ] Save settings.
+
+LOCAL CORRECTION
+[ ] Type: Play Pasuri
+Expected: AURA understands Pasoori.
+[ ] Type: opep you tube
+Expected: AURA corrects and opens YouTube.
+[ ] Type: play kesaria
+Expected: AURA understands Kesariya.
+
+EXACT AUTOPLAY
+[ ] Say: Aura, play Pasoori
+Expected: an exact YouTube watch URL opens and playback normally begins.
+[ ] Say: Aura, play Shape of You by Ed Sheeran
+Expected: an official or high-confidence result is preferred.
+[ ] Say: Aura, play Pasoori karaoke
+Expected: the requested karaoke variant is not penalized.
+[ ] Say: Aura, play Pasoori on Spotify
+Expected: Spotify flow is preserved and is not intercepted.
+
+FALLBACKS
+[ ] Temporarily clear the YouTube API key and say: Play Pasoori
+Expected: YouTube search results open with a clear setup message.
+[ ] Use a very ambiguous title.
+Expected: AURA opens search results instead of confidently playing a wrong
+          video.
+[ ] Disable Automatically play exact YouTube result.
+Expected: search results open.
+
+AI COMMAND REPAIR
+[ ] Say a short misspelled device command not covered locally.
+Expected: when Gemini is enabled, AURA states the corrected interpretation and
+          runs it through the local safety policy.
+[ ] Say a long general question.
+Expected: it is not rewritten as a command.
+[ ] Include an OTP or API key in text.
+Expected: AI command repair is skipped.
+
+LOGCAT
+Filter:
+AuraActionExecutor|AuraBackgroundAction|AuraWakeService|AndroidRuntime|FATAL EXCEPTION
+
+KNOWN LIMITS
+- YouTube may show an advertisement, age gate, consent screen, or network
+  message before playback.
+- YouTube Data API quota is separate from Gemini quota.
+- Search ranking cannot guarantee the user's preferred upload for every
+  ambiguous title.

@@ -1,0 +1,24 @@
+﻿AURA v0.12.0 stability + low-latency upgrade
+Date: 2026-08-15 21:23:24
+Project: E:\MY PROJECT FOLDER\AURA PROJECT\AURA-Butler-Android-Studio-v0.4.0-Native-Stable
+Cloud: E:\MY PROJECT FOLDER\AURA CLOUD
+Android patched: 10
+Android already current: 0
+Cloud patch state: patched
+Cloud deployment skipped: False
+Android build skipped: False
+Build succeeded: True
+
+Fixes included:
+- Trusted Modal 303 result redirects for long Qwen/research requests.
+- ResearchGateway/SearXNG container startup isolation and better startup diagnostics.
+- Qwen/Gemma 180-second warm window; ResearchGateway 120-second warm window.
+- Detailed news falls back to the live keyless source feed instead of generic internal error.
+- Private research returns a specific service error rather than a generic crash.
+- Mail/email notification phrases route to the notification analyzer.
+- Adaptive noise-aware VAD for manual microphone and wake-word commands.
+- Whisper model loading overlaps command capture to reduce perceived voice latency.
+- Faster non-blocking wake acknowledgement tone and shorter post-wake delay.
+- Safer, useful cloud/network timeout messages.
+
+Model weights were not redownloaded or replaced.

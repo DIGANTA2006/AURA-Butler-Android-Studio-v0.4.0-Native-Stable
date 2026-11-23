@@ -1,0 +1,76 @@
+AURA v0.8.0 — Device Intelligence and Smart Butler
+
+Version
+- versionCode: 10
+- versionName: 0.8.0-device-intelligence
+
+Included capabilities
+1. Device audio control
+   - Media, ringtone, alarm, notification, call and system streams.
+   - Raise, lower, mute, unmute, minimum, maximum and percentage commands.
+
+2. One-shot screenshots
+   - Commands such as “take a screenshot” and “save this screen”.
+   - Android asks for screen-sharing consent for each capture session.
+   - Saves the approved frame in Pictures/AURA on Android 10 and later.
+
+3. Screen and document understanding
+   - Read, transcribe, summarize, translate, explain and analyze visible text.
+   - Corrects only obvious OCR/spelling mistakes and marks unclear text instead of inventing it.
+   - Preserves names, numbers, dates, URLs, codes and technical terms.
+
+4. Thermal status and Cooling Assist
+   - Reports battery percentage, battery-temperature sensor, charging state,
+     Android thermal status and Battery Saver state when available.
+   - Cooling Assist can reduce display brightness when system-settings permission
+     is granted and opens Battery Saver controls.
+   - It does not claim to control sealed hardware, fans or the phone's firmware.
+
+5. Safe cache controls
+   - Cleans AURA's temporary cache without deleting settings, private memory,
+     notification history or Gemini/Groq keys.
+   - Opens Android Storage settings for phone-wide cleanup.
+   - Opens a selected app's App Info page because ordinary apps cannot silently
+     clear another app's cache.
+
+6. YouTube video control
+   - Opens exact HTTPS YouTube links in the YouTube app when installed.
+   - Searches YouTube for a named/specific video, even with shortened commands.
+   - Keeps normal “open YouTube” app launching.
+
+7. WhatsApp group summarization
+   - Extracts Android MessagingStyle messages, sender names and group titles.
+   - Groups messages by conversation and summarizes a named group or all recent
+     WhatsApp notifications.
+   - Works only with notification content Android exposes after Notification
+     Access is granted; it does not read WhatsApp's private database or old chats.
+
+8. Smart command recovery
+   - Conservatively corrects common voice/typing mistakes and missing command
+     structure around AURA's supported vocabulary.
+   - Examples: opep→open, wataop→WhatsApp, grop→group,
+     vollume→volume, vedio→video, sumarize→summarize,
+     anslise→analyze, translet→translate, onscren→on screen,
+     coolinig→cooling, catch clean→cache clean.
+   - URLs, email addresses, long prose, codes and secrets are left untouched.
+
+9. Smart-butler personality
+   - Optional original dry, intelligent butler banter for normal device commands.
+   - Levels: Off, Subtle and Playful.
+   - No jokes are added to urgent, medical, payment, security, OTP, error,
+     research or news responses.
+   - Foreground chat and background wake-word replies use the same setting.
+
+10. Existing v0.7 Analyzer capabilities retained
+   - Encrypted notification vault and priority classification.
+   - Gmail/Slack/Jira notification preview summaries.
+   - Detailed current news and grounded research when configured.
+   - Gallery image analysis, screen analysis, song finder and temporal memory.
+
+Privacy and Android boundaries
+- Screen capture always requires visible Android consent.
+- Notification analysis requires Notification Access and begins after it is granted.
+- Detailed vision/translation uses the configured Gemini provider when enabled.
+- AURA never asks for WhatsApp/Gmail passwords and cannot bypass app encryption.
+- Other apps' caches cannot be silently deleted by a normal third-party app.
+- Cooling Assist reduces permitted power use; actual cooling is controlled by Android and hardware.
