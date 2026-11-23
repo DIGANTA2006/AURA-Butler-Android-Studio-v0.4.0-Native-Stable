@@ -72,7 +72,7 @@ class SafeHttpClientTest {
     }
 
     @Test
-    fun requestBodyLimitIsEightMiB() {
-        assertEquals(8 * 1024 * 1024, SafeHttpClient.MAX_ALLOWED_REQUEST_BYTES)
+    fun requestBodyLimitIsSixteenMiB() {
+        assertEquals(16 * 1024 * 1024, SafeHttpClient.MAX_ALLOWED_REQUEST_BYTES)
     }
 }
