@@ -234,7 +234,7 @@ class ProactiveEngine(
      */
     fun registerAgent(agent: BackgroundAgent) {
         agents[agent.id] = agent
-        if (running) scheduleAgent(agent)
+        if (running && agent.enabled) scheduleAgent(agent)
     }
 
     /**
