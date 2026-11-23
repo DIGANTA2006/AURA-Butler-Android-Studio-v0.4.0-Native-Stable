@@ -4,6 +4,7 @@ import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -122,20 +123,32 @@ class SemanticMemory(
         context: ConversationContext,
         options: RecallOptions = RecallOptions()
     ): RetrievalResult = withContext(Dispatchers.IO) {
+        require(query.isNotBlank()) { "Memory recall query cannot be blank." }
         val allEntries = memoryStore.getAll()
-        val queryEmbedding = embeddingProvider.embed(query)
-        
-        val scored = allEntries.mapNotNull { entry ->
-            entry.embedding?.let { emb ->
-                val similarity = cosineSimilarity(queryEmbedding, emb)
-                val relevance = calculateRelevance(entry, query, context, options)
-                val combined = (similarity * options.semanticWeight) + (relevance * (1 - options.semanticWeight))
-                
-                ScoredMemory(entry, similarity, relevance, combined)
+        val queryEmbedding = embeddingProvider.embed(query.take(MAX_QUERY_CHARS))
+        val maxResults = options.maxResults.coerceIn(1, MAX_RECALL_RESULTS)
+        val minScore = options.minScore.coerceIn(0.0, 1.0)
+        val semanticWeight = options.semanticWeight.coerceIn(0.0, 1.0)
+        val timeRange = options.timeRange?.takeIf { it.start <= it.end }
+
+        val scored = allEntries.asSequence()
+            .filter { entry ->
+                timeRange == null || entry.createdAt in timeRange.start..timeRange.end
             }
-        }.filter { it.combinedScore >= options.minScore }
+            .mapNotNull { entry ->
+                entry.embedding?.let { embedding ->
+                    if (embedding.size != queryEmbedding.size) return@mapNotNull null
+                    val similarity = cosineSimilarity(queryEmbedding, embedding)
+                    val relevance = calculateRelevance(entry, query, context, options)
+                    val combined = (similarity * semanticWeight) +
+                        (relevance * (1.0 - semanticWeight))
+                    ScoredMemory(entry, similarity, relevance, combined)
+                }
+            }
+            .filter { it.combinedScore >= minScore }
             .sortedByDescending { it.combinedScore }
-            .take(options.maxResults)
+            .take(maxResults)
+            .toList()
         
         // Apply strategy-specific re-ranking
         val finalResults = applyStrategy(scored, query, context, options.strategy)
@@ -478,8 +491,107 @@ class SemanticMemory(
     }
 
     private fun parsePatternResponse(response: String, entries: List<MemoryEntry>): PatternResult {
-        // Simplified - in production, parse JSON and create concept memories
-        return PatternResult(0, 0, emptyList())
+        val jsonStart = response.indexOf('{')
+        val jsonEnd = response.lastIndexOf('}')
+        if (jsonStart < 0 || jsonEnd <= jsonStart) {
+            return PatternResult(0, 0, listOf("Pattern analysis returned no JSON object."))
+        }
+        val root = runCatching {
+            org.json.JSONObject(response.substring(jsonStart, jsonEnd + 1))
+        }.getOrElse {
+            return PatternResult(0, 0, listOf("Pattern analysis returned malformed JSON."))
+        }
+
+        val allowedEntries = entries.associateBy { it.id }
+        val patterns = root.optJSONArray("patterns")
+        var validPatterns = 0
+        if (patterns != null) {
+            for (index in 0 until minOf(patterns.length(), MAX_PARSED_PATTERNS)) {
+                val item = patterns.optJSONObject(index) ?: continue
+                val theme = SecretRedactor.redact(
+                    item.optString("theme").trim(),
+                    MAX_CONCEPT_NAME_CHARS
+                ).trim()
+                val ids = readValidatedIds(item.optJSONArray("memoryIds"), allowedEntries.keys)
+                val confidence = item.optDouble("confidence", 0.0).coerceIn(0.0, 1.0)
+                if (theme.isNotBlank() && ids.size >= MIN_CONCEPT_MEMORY_LINKS &&
+                    confidence >= MIN_PATTERN_CONFIDENCE
+                ) validPatterns++
+            }
+        }
+
+        val concepts = root.optJSONArray("concepts")
+        var conceptsCreated = 0
+        val existingConcepts = memoryStore.getAll()
+            .map { it.label.lowercase(Locale.ROOT) }
+            .toMutableSet()
+        if (concepts != null) {
+            for (index in 0 until minOf(concepts.length(), MAX_CREATED_CONCEPTS)) {
+                val item = concepts.optJSONObject(index) ?: continue
+                val name = SecretRedactor.redact(
+                    item.optString("name").trim(),
+                    MAX_CONCEPT_NAME_CHARS
+                ).trim()
+                val description = SecretRedactor.redact(
+                    item.optString("description").trim(),
+                    MAX_CONCEPT_DESCRIPTION_CHARS
+                ).trim()
+                val ids = readValidatedIds(
+                    item.optJSONArray("relatedMemoryIds"),
+                    allowedEntries.keys
+                )
+                val label = "Concept: $name"
+                if (
+                    name.length !in MIN_CONCEPT_NAME_CHARS..MAX_CONCEPT_NAME_CHARS ||
+                    description.length < MIN_CONCEPT_DESCRIPTION_CHARS ||
+                    ids.size < MIN_CONCEPT_MEMORY_LINKS ||
+                    SecretRedactor.containsSensitive("$name\n$description") ||
+                    label.lowercase(Locale.ROOT) in existingConcepts
+                ) continue
+
+                val relatedEntries = ids.mapNotNull(allowedEntries::get)
+                val safeContent = buildString {
+                    append(description)
+                    append("\n\nSupported by memories: ")
+                    append(relatedEntries.joinToString("; ") { it.label.take(80) })
+                }.take(MAX_CONCEPT_DESCRIPTION_CHARS + 500)
+                if (SecretRedactor.containsSensitive(safeContent)) continue
+
+                val concept = MemoryEntry(
+                    content = safeContent,
+                    label = label,
+                    embedding = embeddingProvider.embed(safeContent),
+                    metadata = MemoryMetadata(
+                        relatedEntities = relatedEntries.map { it.label }.distinct().take(10),
+                        confidence = CONCEPT_MEMORY_CONFIDENCE
+                    ),
+                    importance = CONCEPT_MEMORY_IMPORTANCE,
+                    tags = setOf("consolidated", "concept"),
+                    source = MemorySource.CONSOLIDATED
+                )
+                memoryStore.save(concept)
+                existingConcepts += label.lowercase(Locale.ROOT)
+                conceptsCreated++
+            }
+        }
+
+        val errors = if (validPatterns == 0 && conceptsCreated == 0) {
+            listOf("No pattern or concept passed the validation requirements.")
+        } else emptyList()
+        return PatternResult(validPatterns, conceptsCreated, errors)
+    }
+
+    private fun readValidatedIds(
+        array: org.json.JSONArray?,
+        allowedIds: Set<String>
+    ): Set<String> {
+        if (array == null) return emptySet()
+        return buildSet {
+            for (index in 0 until minOf(array.length(), MAX_PATTERN_REFERENCES)) {
+                val id = array.optString(index).trim()
+                if (id.isNotBlank() && id in allowedIds) add(id)
+            }
+        }
     }
 
     private fun applyForgettingCurve(entries: List<MemoryEntry>): Int {
@@ -520,7 +632,7 @@ class SemanticMemory(
             if (count == lastScheduledConsolidationCount) return
             lastScheduledConsolidationCount = count
             maintenanceScope.launch {
-                runCatching { consolidate() }
+                runCatchingCancellable { consolidate() }
             }
         }
     }
@@ -563,6 +675,22 @@ class SemanticMemory(
         val sourceDistribution: Map<MemorySource, Int>,
         val storageSizeEstimate: Long
     )
+
+    private companion object {
+        const val MAX_QUERY_CHARS = 2_000
+        const val MAX_RECALL_RESULTS = 100
+        const val MAX_PARSED_PATTERNS = 20
+        const val MAX_CREATED_CONCEPTS = 8
+        const val MAX_PATTERN_REFERENCES = 20
+        const val MIN_CONCEPT_MEMORY_LINKS = 2
+        const val MIN_PATTERN_CONFIDENCE = 0.55
+        const val MIN_CONCEPT_NAME_CHARS = 3
+        const val MAX_CONCEPT_NAME_CHARS = 100
+        const val MIN_CONCEPT_DESCRIPTION_CHARS = 12
+        const val MAX_CONCEPT_DESCRIPTION_CHARS = 800
+        const val CONCEPT_MEMORY_CONFIDENCE = 0.65
+        const val CONCEPT_MEMORY_IMPORTANCE = 0.65
+    }
 }
 
 /**
@@ -574,51 +702,91 @@ interface EmbeddingProvider {
 }
 
 /**
- * Temporary deterministic hash embedding used as a compile-safe fallback.
- * This is not ONNX inference and does not provide semantic-quality embeddings.
+ * Deterministic local feature-hash vectors. These are lexical features, not
+ * neural embeddings; the configured ONNX model path is not loaded here.
  */
 class LocalEmbeddingProvider(
     private val modelPath: String
 ) : EmbeddingProvider {
-    override val dimension: Int = 384  // all-MiniLM-L6-v2 dimension
-    
-    override fun embed(text: String): FloatArray {
-        // The configured modelPath is not loaded by this implementation.
-        // Return a deterministic placeholder vector so callers can be tested,
-        // but do not treat it as semantic model inference.
-        return generatePseudoEmbedding(text)
-    }
-    
-    internal fun generatePseudoEmbedding(text: String): FloatArray {
-        val embedding = FloatArray(dimension)
-        val random = java.util.Random(text.hashCode().toLong())
-        for (i in embedding.indices) {
-            embedding[i] = (random.nextGaussian().toFloat() * 0.1f).coerceIn(-1f, 1f)
-        }
-        // Normalize in double precision, then store unit-length Float values.
-        val norm = kotlin.math.sqrt(embedding.sumOf { value -> value.toDouble() * value.toDouble() })
-        if (norm > 1e-12) {
-            for (i in embedding.indices) {
-                embedding[i] = (embedding[i].toDouble() / norm).toFloat()
-            }
-        }
-        return embedding
-    }
+    override val dimension: Int = 384
+    val isModelBacked: Boolean = false
+    val backendDescription: String =
+        "Local hashed lexical features; no ONNX model is loaded."
+
+    override fun embed(text: String): FloatArray =
+        HashedTextVectorizer.embed(text, dimension)
+
+    internal fun generatePseudoEmbedding(text: String): FloatArray = embed(text)
 }
 
 /**
- * Remote embedding provider (OpenAI-compatible / Modal).
+ * Compatibility placeholder only. No request is sent to the configured endpoint.
+ * Kept temporarily so old call sites cannot mistake remote inference for a feature.
  */
+@Deprecated(
+    message = "Remote embedding HTTP calls are not implemented; this is a local feature-hash fallback."
+)
 class RemoteEmbeddingProvider(
     private val endpoint: String,
     private val apiKey: String,
     private val model: String = "text-embedding-3-small"
 ) : EmbeddingProvider {
-    override val dimension: Int = 1536  // text-embedding-3-small
-    
-    override fun embed(text: String): FloatArray {
-        // Placeholder - in production, make HTTP request
-        return LocalEmbeddingProvider("").generatePseudoEmbedding(text)
+    override val dimension: Int = 1536
+    val isRemote: Boolean = false
+
+    override fun embed(text: String): FloatArray =
+        HashedTextVectorizer.embed(text, dimension)
+}
+
+/** Signed feature hashing across bounded token, phrase and character features. */
+private object HashedTextVectorizer {
+    private const val MAX_INPUT_CHARS = 6_000
+    private const val MAX_TOKENS = 500
+
+    fun embed(text: String, dimension: Int): FloatArray {
+        require(dimension > 0) { "Feature vector dimension must be positive." }
+        val vector = FloatArray(dimension)
+        val normalized = text.lowercase(Locale.ROOT)
+            .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+            .trim()
+            .take(MAX_INPUT_CHARS)
+        if (normalized.isBlank()) return vector
+
+        val words = normalized.split(' ')
+            .asSequence()
+            .filter { it.length >= 2 }
+            .take(MAX_TOKENS)
+            .toList()
+
+        words.forEach { word ->
+            addFeature(vector, "w:$word", 1.0)
+            val padded = "^$word$"
+            if (padded.length >= 3) {
+                for (index in 0..padded.length - 3) {
+                    addFeature(vector, "c:${padded.substring(index, index + 3)}", 0.18)
+                }
+            }
+        }
+        for (index in 0 until words.lastIndex) {
+            addFeature(vector, "b:${words[index]}:${words[index + 1]}", 0.45)
+        }
+
+        val norm = kotlin.math.sqrt(
+            vector.sumOf { value -> value.toDouble() * value.toDouble() }
+        )
+        if (norm > 1e-12) {
+            for (index in vector.indices) {
+                vector[index] = (vector[index].toDouble() / norm).toFloat()
+            }
+        }
+        return vector
+    }
+
+    private fun addFeature(vector: FloatArray, feature: String, weight: Double) {
+        val hash = feature.hashCode()
+        val index = (hash and Int.MAX_VALUE) % vector.size
+        val sign = if (hash < 0) -1.0 else 1.0
+        vector[index] = (vector[index] + sign * weight).toFloat()
     }
 }
 
