@@ -64,28 +64,44 @@ object RemoteConfig {
         }
 
         // Fallback to cache
-        val cached = networkManifest ?: loadCache(context)
-            ?: EndpointManifest(
-                version = 2,
-                textEndpoint = "https://diganta2006--aura-dual-model-server-qwentext-web.modal.run/v1/chat/completions",
-                visionEndpoint = "https://diganta2006--aura-dual-model-server-gemmavision-web.modal.run/v1/chat/completions",
-                researchEndpoint = "https://diganta2006--aura-dual-model-server-researchgateway-web.modal.run/v1/research",
-                models = EndpointManifest.Models(
-                    text = "Qwen/Qwen3-8B",
-                    vision = "google/gemma-3-4b-it",
-                    research = "Qwen/Qwen3-8B"
-                ),
-                budgets = EndpointManifest.Budgets(
-                    dailyText = 0,      // JARVIS MODE: 0 = unlimited
-                    dailyVision = 0,    // JARVIS MODE: 0 = unlimited
-                    dailyResearch = 0,  // JARVIS MODE: 0 = unlimited
-                    dailyAuxiliary = 0  // JARVIS MODE: 0 = unlimited
-                )
-            )
+        val cached = networkManifest ?: loadCache(context) ?: defaultManifest()
 
         cachedManifest = cached
         cached
     }
+
+    /**
+     * Synchronous read for UI/settings initialization. It never performs network
+     * I/O: callers get the in-memory value, a valid disk cache, or safe defaults.
+     * A later fetchOrCached() can still refresh the manifest from the network.
+     */
+    fun getCachedOrDefault(context: Context): EndpointManifest {
+        cachedManifest?.let { return it }
+        val persisted = loadCache(context)
+        if (persisted != null) {
+            cachedManifest = persisted
+            return persisted
+        }
+        return defaultManifest()
+    }
+
+    private fun defaultManifest(): EndpointManifest = EndpointManifest(
+        version = 2,
+        textEndpoint = "https://diganta2006--aura-dual-model-server-qwentext-web.modal.run/v1/chat/completions",
+        visionEndpoint = "https://diganta2006--aura-dual-model-server-gemmavision-web.modal.run/v1/chat/completions",
+        researchEndpoint = "https://diganta2006--aura-dual-model-server-researchgateway-web.modal.run/v1/research",
+        models = EndpointManifest.Models(
+            text = "Qwen/Qwen3-8B",
+            vision = "google/gemma-3-4b-it",
+            research = "Qwen/Qwen3-8B"
+        ),
+        budgets = EndpointManifest.Budgets(
+            dailyText = 0,
+            dailyVision = 0,
+            dailyResearch = 0,
+            dailyAuxiliary = 0
+        )
+    )
 
     /** Forces a refetch on next call (e.g., after user changes config URL in settings). */
     fun invalidateCache() { cachedManifest = null }
