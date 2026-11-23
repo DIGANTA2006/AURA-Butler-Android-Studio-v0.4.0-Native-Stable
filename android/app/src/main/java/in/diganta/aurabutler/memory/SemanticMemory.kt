@@ -456,23 +456,34 @@ class SemanticMemory(
         val errors: List<String>
     )
 
+    internal data class PatternCandidate(
+        val theme: String,
+        val memoryIds: Set<String>,
+        val confidence: Double
+    )
+
+    internal data class ConceptCandidate(
+        val name: String,
+        val description: String,
+        val relatedMemoryIds: Set<String>
+    )
+
     private suspend fun extractPatterns(entries: List<MemoryEntry>): PatternResult {
-        // Group by temporal proximity and entities
-        val recentEntries = entries.filter { 
-            (System.currentTimeMillis() - it.createdAt) < 30L * 24 * 3600 * 1000 // Last 30 days
+        val recentEntries = entries.filter {
+            (System.currentTimeMillis() - it.createdAt) < 30L * 24 * 3600 * 1000
         }
-        
+
         if (recentEntries.size < 5) return PatternResult(0, 0, emptyList())
-        
+
         val prompt = """
             Analyze these memory entries and identify:
             1. Recurring themes/topics (patterns)
             2. Higher-level concepts that unite multiple memories
             3. Contradictions or updates to previous information
-            
+
             Memories:
             ${recentEntries.take(50).joinToString("\n") { "- ${it.label}: ${it.content.take(200)}" }}
-            
+
             Return JSON:
             {
               "patterns": [{"theme": "...", "memoryIds": [...], "confidence": 0.0-1.0}],
@@ -480,105 +491,157 @@ class SemanticMemory(
               "contradictions": [{"old": "...", "new": "...", "memoryIds": [...]}]
             }
         """.trimIndent()
-        
+
         return try {
             val response = aiProvider!!.answer(prompt, ConversationContext.empty())
             parsePatternResponse(response ?: "", recentEntries)
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (e: Exception) {
-            PatternResult(0, 0, listOf(e.message ?: "Pattern extraction failed"))
+        } catch (error: Exception) {
+            PatternResult(0, 0, listOf(error.message ?: "Pattern extraction failed"))
         }
     }
 
-    internal fun parsePatternResponse(response: String, entries: List<MemoryEntry>): PatternResult {
+    private fun parsePatternResponse(
+        response: String,
+        entries: List<MemoryEntry>
+    ): PatternResult {
         val jsonStart = response.indexOf('{')
         val jsonEnd = response.lastIndexOf('}')
         if (jsonStart < 0 || jsonEnd <= jsonStart) {
             return PatternResult(0, 0, listOf("Pattern analysis returned no JSON object."))
         }
+
         val root = runCatching {
             org.json.JSONObject(response.substring(jsonStart, jsonEnd + 1))
         }.getOrElse {
             return PatternResult(0, 0, listOf("Pattern analysis returned malformed JSON."))
         }
 
-        val allowedEntries = entries.associateBy { it.id }
-        val patterns = root.optJSONArray("patterns")
-        var validPatterns = 0
-        if (patterns != null) {
-            for (index in 0 until minOf(patterns.length(), MAX_PARSED_PATTERNS)) {
-                val item = patterns.optJSONObject(index) ?: continue
-                val theme = SecretRedactor.redact(
-                    item.optString("theme").trim(),
-                    MAX_CONCEPT_NAME_CHARS
-                ).trim()
-                val ids = readValidatedIds(item.optJSONArray("memoryIds"), allowedEntries.keys)
-                val confidence = item.optDouble("confidence", 0.0).coerceIn(0.0, 1.0)
-                if (theme.isNotBlank() && ids.size >= MIN_CONCEPT_MEMORY_LINKS &&
-                    confidence >= MIN_PATTERN_CONFIDENCE
-                ) validPatterns++
+        val allowedIds = entries.mapTo(mutableSetOf()) { it.id }
+        val patternArray = root.optJSONArray("patterns")
+        val patterns = buildList {
+            if (patternArray != null) {
+                for (index in 0 until minOf(patternArray.length(), MAX_PARSED_PATTERNS)) {
+                    val item = patternArray.optJSONObject(index) ?: continue
+                    add(
+                        PatternCandidate(
+                            theme = item.optString("theme").trim(),
+                            memoryIds = readValidatedIds(item.optJSONArray("memoryIds"), allowedIds),
+                            confidence = item.optDouble("confidence", 0.0)
+                        )
+                    )
+                }
             }
         }
 
-        val concepts = root.optJSONArray("concepts")
+        val conceptArray = root.optJSONArray("concepts")
+        val concepts = buildList {
+            if (conceptArray != null) {
+                for (index in 0 until minOf(conceptArray.length(), MAX_CREATED_CONCEPTS)) {
+                    val item = conceptArray.optJSONObject(index) ?: continue
+                    add(
+                        ConceptCandidate(
+                            name = item.optString("name").trim(),
+                            description = item.optString("description").trim(),
+                            relatedMemoryIds = readValidatedIds(
+                                item.optJSONArray("relatedMemoryIds"),
+                                allowedIds
+                            )
+                        )
+                    )
+                }
+            }
+        }
+
+        return validateAndStorePatterns(patterns, concepts, entries)
+    }
+
+    /**
+     * Deterministic validation/storage stage, independent of Android's org.json
+     * runtime so it can be exercised by local JVM unit tests.
+     */
+    internal fun validateAndStorePatterns(
+        proposedPatterns: List<PatternCandidate>,
+        proposedConcepts: List<ConceptCandidate>,
+        entries: List<MemoryEntry>
+    ): PatternResult {
+        val allowedEntries = entries.associateBy { it.id }
+        var validPatterns = 0
+
+        proposedPatterns.take(MAX_PARSED_PATTERNS).forEach { candidate ->
+            val theme = SecretRedactor.redact(
+                candidate.theme.trim(),
+                MAX_CONCEPT_NAME_CHARS
+            ).trim()
+            val ids = candidate.memoryIds.intersect(allowedEntries.keys)
+            val confidence = candidate.confidence.coerceIn(0.0, 1.0)
+            if (
+                theme.isNotBlank() &&
+                ids.size >= MIN_CONCEPT_MEMORY_LINKS &&
+                confidence >= MIN_PATTERN_CONFIDENCE
+            ) {
+                validPatterns++
+            }
+        }
+
         var conceptsCreated = 0
         val existingConcepts = memoryStore.getAll()
             .map { it.label.lowercase(Locale.ROOT) }
             .toMutableSet()
-        if (concepts != null) {
-            for (index in 0 until minOf(concepts.length(), MAX_CREATED_CONCEPTS)) {
-                val item = concepts.optJSONObject(index) ?: continue
-                val name = SecretRedactor.redact(
-                    item.optString("name").trim(),
-                    MAX_CONCEPT_NAME_CHARS
-                ).trim()
-                val description = SecretRedactor.redact(
-                    item.optString("description").trim(),
-                    MAX_CONCEPT_DESCRIPTION_CHARS
-                ).trim()
-                val ids = readValidatedIds(
-                    item.optJSONArray("relatedMemoryIds"),
-                    allowedEntries.keys
-                )
-                val label = "Concept: $name"
-                if (
-                    name.length !in MIN_CONCEPT_NAME_CHARS..MAX_CONCEPT_NAME_CHARS ||
-                    description.length < MIN_CONCEPT_DESCRIPTION_CHARS ||
-                    ids.size < MIN_CONCEPT_MEMORY_LINKS ||
-                    SecretRedactor.containsSensitive("$name\n$description") ||
-                    label.lowercase(Locale.ROOT) in existingConcepts
-                ) continue
 
-                val relatedEntries = ids.mapNotNull(allowedEntries::get)
-                val safeContent = buildString {
-                    append(description)
-                    append("\n\nSupported by memories: ")
-                    append(relatedEntries.joinToString("; ") { it.label.take(80) })
-                }.take(MAX_CONCEPT_DESCRIPTION_CHARS + 500)
-                if (SecretRedactor.containsSensitive(safeContent)) continue
+        proposedConcepts.take(MAX_CREATED_CONCEPTS).forEach { candidate ->
+            val name = SecretRedactor.redact(
+                candidate.name.trim(),
+                MAX_CONCEPT_NAME_CHARS
+            ).trim()
+            val description = SecretRedactor.redact(
+                candidate.description.trim(),
+                MAX_CONCEPT_DESCRIPTION_CHARS
+            ).trim()
+            val ids = candidate.relatedMemoryIds.intersect(allowedEntries.keys)
+            val label = "Concept: $name"
 
-                val concept = MemoryEntry(
-                    content = safeContent,
-                    label = label,
-                    embedding = embeddingProvider.embed(safeContent),
-                    metadata = MemoryMetadata(
-                        relatedEntities = relatedEntries.map { it.label }.distinct().take(10),
-                        confidence = CONCEPT_MEMORY_CONFIDENCE
-                    ),
-                    importance = CONCEPT_MEMORY_IMPORTANCE,
-                    tags = setOf("consolidated", "concept"),
-                    source = MemorySource.CONSOLIDATED
-                )
-                memoryStore.save(concept)
-                existingConcepts += label.lowercase(Locale.ROOT)
-                conceptsCreated++
+            if (
+                name.length !in MIN_CONCEPT_NAME_CHARS..MAX_CONCEPT_NAME_CHARS ||
+                description.length < MIN_CONCEPT_DESCRIPTION_CHARS ||
+                ids.size < MIN_CONCEPT_MEMORY_LINKS ||
+                SecretRedactor.containsSensitive("$name\n$description") ||
+                label.lowercase(Locale.ROOT) in existingConcepts
+            ) {
+                return@forEach
             }
+
+            val relatedEntries = ids.mapNotNull(allowedEntries::get)
+            val safeContent = buildString {
+                append(description)
+                append("\n\nSupported by memories: ")
+                append(relatedEntries.joinToString("; ") { it.label.take(80) })
+            }.take(MAX_CONCEPT_DESCRIPTION_CHARS + 500)
+            if (SecretRedactor.containsSensitive(safeContent)) return@forEach
+
+            val concept = MemoryEntry(
+                content = safeContent,
+                label = label,
+                embedding = embeddingProvider.embed(safeContent),
+                metadata = MemoryMetadata(
+                    relatedEntities = relatedEntries.map { it.label }.distinct().take(10),
+                    confidence = CONCEPT_MEMORY_CONFIDENCE
+                ),
+                importance = CONCEPT_MEMORY_IMPORTANCE,
+                tags = setOf("consolidated", "concept"),
+                source = MemorySource.CONSOLIDATED
+            )
+            memoryStore.save(concept)
+            existingConcepts += label.lowercase(Locale.ROOT)
+            conceptsCreated++
         }
 
         val errors = if (validPatterns == 0 && conceptsCreated == 0) {
             listOf("No pattern or concept passed the validation requirements.")
-        } else emptyList()
+        } else {
+            emptyList()
+        }
         return PatternResult(validPatterns, conceptsCreated, errors)
     }
 
