@@ -2,8 +2,12 @@ package `in`.diganta.aurabutler.memory
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.model.ConversationContext
+import kotlinx.coroutines.runBlocking
 
 class SemanticMemoryFeatureVectorTest {
     @Test
@@ -103,6 +107,64 @@ class SemanticMemoryFeatureVectorTest {
         assertEquals(0, result.patternsFound)
         assertEquals(0, result.conceptsCreated)
         assertTrue(store.getAll().isEmpty())
+    }
+
+    @Test
+    fun memoryStoreEvictsLeastRecentlyUsedEntryAtConfiguredCapacity() {
+        val store = MemoryStore(maxEntries = 2)
+        val first = SemanticMemory.MemoryEntry(
+            content = "First memory entry with content.",
+            label = "First"
+        )
+        val second = SemanticMemory.MemoryEntry(
+            content = "Second memory entry with content.",
+            label = "Second"
+        )
+        val third = SemanticMemory.MemoryEntry(
+            content = "Third memory entry with content.",
+            label = "Third"
+        )
+
+        store.save(first)
+        store.save(second)
+        assertEquals(first.id, store.get(first.id)?.id)
+        store.save(third)
+
+        assertEquals(2, store.size())
+        assertEquals(first.id, store.get(first.id)?.id)
+        assertNull(store.get(second.id))
+        assertEquals(third.id, store.get(third.id)?.id)
+    }
+
+    @Test
+    fun invalidTimeRangeReturnsNoResultsInsteadOfRemovingTheFilter() = runBlocking {
+        val provider = LocalEmbeddingProvider("unused")
+        val store = MemoryStore()
+        store.save(
+            SemanticMemory.MemoryEntry(
+                content = "AURA voice interruption memory.",
+                label = "Voice interruption",
+                embedding = provider.embed("AURA voice interruption memory"),
+                createdAt = 10L
+            )
+        )
+        val memory = SemanticMemory(null, provider, store)
+        val context = ConversationContext(
+            recentMessages = emptyList(),
+            memories = emptyList(),
+            settings = ButlerSettings()
+        )
+
+        val result = memory.recall(
+            query = "voice interruption",
+            context = context,
+            options = SemanticMemory.RecallOptions(
+                timeRange = SemanticMemory.TimeRange(start = 20L, end = 10L)
+            )
+        )
+
+        assertTrue(result.entries.isEmpty())
+        assertEquals(1, result.totalCandidates)
     }
 
     private fun cosine(a: FloatArray, b: FloatArray): Double {
