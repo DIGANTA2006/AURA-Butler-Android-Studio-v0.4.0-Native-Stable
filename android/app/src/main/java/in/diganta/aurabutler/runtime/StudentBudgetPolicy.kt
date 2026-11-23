@@ -12,6 +12,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
 import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 enum class AiWorkload(val wireName: String) {
     TEXT("text"),
@@ -179,12 +184,25 @@ object StudentBudgetGuard {
 
     private val lock = Any()
     private val reservations = LinkedHashMap<String, Reservation>()
+    private val initializationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var appContext: Context? = null
+    @Volatile private var initializationJob: Job? = null
 
+    /**
+     * Startup must remain non-blocking. The hardcoded safe limits are available
+     * immediately; remote manifest limits are loaded on IO and atomically applied.
+     */
     fun initialize(context: Context) {
-        appContext = context.applicationContext
-        // Initialize dynamic budgets from remote manifest
-        StudentBudgetConfig.initialize(context)
+        val app = context.applicationContext
+        appContext = app
+        synchronized(lock) {
+            if (StudentBudgetConfig.isInitialized() || initializationJob?.isActive == true) {
+                return
+            }
+            initializationJob = initializationScope.launch {
+                runCatching { StudentBudgetConfig.initialize(app) }
+            }
+        }
     }
 
     fun tryReserve(
