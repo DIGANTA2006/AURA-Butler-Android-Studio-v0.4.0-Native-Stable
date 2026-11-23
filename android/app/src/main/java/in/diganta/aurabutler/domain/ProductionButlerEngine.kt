@@ -22,10 +22,14 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * Mobile port of the hardened AURA 8.2 orchestration core.
@@ -79,7 +83,7 @@ class ProductionButlerEngine(
 
         return try {
             val deterministicStartedAt = SystemClock.elapsedRealtime()
-            var direct = withTimeout(
+            var direct = withTimeoutOrNull(
                 remainingTurnMs(turnDeadlineAt, deterministicTimeoutMs(effectiveMessage))
             ) {
                 deterministicReply(
@@ -100,14 +104,18 @@ class ProductionButlerEngine(
                 CommandNormalizer.isLikelyCommand(effectiveMessage)
             ) {
                 val repairStartedAt = SystemClock.elapsedRealtime()
-                val repair = runCatching {
-                    withTimeout(remainingTurnMs(turnDeadlineAt, COMMAND_REPAIR_TIMEOUT_MS)) {
+                val repair = try {
+                    withTimeoutOrNull(remainingTurnMs(turnDeadlineAt, COMMAND_REPAIR_TIMEOUT_MS)) {
                         commandInterpreter.repairCommand(
                             raw = effectiveMessage,
                             settings = context.settings
                         )
                     }
-                }.getOrNull()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
                 commandRepairMs += SystemClock.elapsedRealtime() - repairStartedAt
 
                 val repaired = repair
@@ -129,7 +137,7 @@ class ProductionButlerEngine(
                         router.route(effectiveMessage)
                     }
                     val repairedDeterministicStartedAt = SystemClock.elapsedRealtime()
-                    direct = withTimeout(
+                    direct = withTimeoutOrNull(
                         remainingTurnMs(turnDeadlineAt, deterministicTimeoutMs(effectiveMessage))
                     ) {
                         deterministicReply(
@@ -144,11 +152,15 @@ class ProductionButlerEngine(
 
             if (direct == null && shouldUseStructuredAgent(effectiveMessage, context)) {
                 val agentStartedAt = SystemClock.elapsedRealtime()
-                direct = runCatching {
-                    withTimeout(remainingTurnMs(turnDeadlineAt, AGENT_TIMEOUT_MS)) {
+                direct = try {
+                    withTimeoutOrNull(remainingTurnMs(turnDeadlineAt, AGENT_TIMEOUT_MS)) {
                         runStructuredAgent(effectiveMessage, context)
                     }
-                }.getOrNull()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
                 agentMs += SystemClock.elapsedRealtime() - agentStartedAt
             }
 
@@ -171,7 +183,7 @@ class ProductionButlerEngine(
                 }
 
                 val delegatedStartedAt = SystemClock.elapsedRealtime()
-                val delegatedReply = withTimeout(
+                val delegatedReply = withTimeoutOrNull(
                     remainingTurnMs(turnDeadlineAt, turnTimeoutMs(effectiveMessage, safeContext))
                 ) {
                     delegate.chat(
@@ -179,7 +191,9 @@ class ProductionButlerEngine(
                         context = safeContext,
                         onPartial = onPartial
                     )
-                }
+                } ?: throw IOException(
+                    "The request reached AURA's time limit before the optional AI reply completed."
+                )
                 delegatedAiMs += SystemClock.elapsedRealtime() - delegatedStartedAt
                 delegatedReply.copy(
                     provider = inferProvider(route, safeContext),
@@ -223,6 +237,21 @@ class ProductionButlerEngine(
             )
             AuraRuntimeStateMachine.forceIdleUnlessListening("turn completed")
             resolvedReply.copy(latencyMs = latency)
+        } catch (cancelled: CancellationException) {
+            val latency = SystemClock.elapsedRealtime() - startedAt
+            audit.record(
+                event = "turn.cancelled",
+                fields = mapOf(
+                    "intent" to route.intent,
+                    "latency_ms" to latency,
+                    "deterministic_ms" to deterministicMs,
+                    "command_repair_ms" to commandRepairMs,
+                    "agent_ms" to agentMs,
+                    "delegated_ai_ms" to delegatedAiMs
+                )
+            )
+            AuraRuntimeStateMachine.forceIdleUnlessListening("turn cancelled")
+            throw cancelled
         } catch (error: Exception) {
             val latency = SystemClock.elapsedRealtime() - startedAt
             audit.record(
@@ -282,6 +311,7 @@ class ProductionButlerEngine(
         )
         val replies = mutableListOf<Pair<StructuredAgentProvider.Step, ButlerReply>>()
         for (step in steps.take(MAX_AGENT_STEPS)) {
+            currentCoroutineContext().ensureActive()
             val stepRoute = withContext(Dispatchers.Default) {
                 router.route(step.command)
             }
