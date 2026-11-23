@@ -2,9 +2,14 @@ package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
+import `in`.diganta.aurabutler.memory.LocalEmbeddingProvider
+import `in`.diganta.aurabutler.memory.MemoryStore
 import `in`.diganta.aurabutler.memory.SemanticMemory
+import `in`.diganta.aurabutler.model.ChatMessage
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.model.Sender
+import `in`.diganta.aurabutler.planning.PlanStore
 import `in`.diganta.aurabutler.planning.TaskPlanner
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import kotlinx.coroutines.Dispatchers
@@ -29,10 +34,10 @@ class IntelligenceCoordinator(
     // Core intelligence components
     private val toolRegistry = ReasoningEngine.ToolRegistry()
     private val reasoningEngine = ReasoningEngine(aiProvider, toolRegistry)
-    private val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
-    private val memoryStore = SemanticMemory.MemoryStore()
+    private val embeddingProvider = LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
+    private val memoryStore = MemoryStore()
     private val semanticMemory = SemanticMemory(aiProvider, embeddingProvider, memoryStore)
-    private val planStore = TaskPlanner.PlanStore()
+    private val planStore = PlanStore()
     private val taskPlanner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
     private val proactiveEngine = ProactiveEngine(aiProvider, semanticMemory, settings, contextProvider)
 
@@ -89,7 +94,7 @@ class IntelligenceCoordinator(
         // Determine processing strategy based on input and mode
         val strategy = determineStrategy(input, context)
         
-        return when (strategy) {
+        return@withContext when (strategy) {
             ProcessingStrategy.LOCAL_COMMAND -> processLocalCommand(input, context, startTime)
             ProcessingStrategy.AI_REASONING -> processWithReasoning(input, context, startTime)
             ProcessingStrategy.PLAN_AND_EXECUTE -> processWithPlanning(input, context, startTime)
@@ -138,9 +143,9 @@ class IntelligenceCoordinator(
         val plan = taskPlanner.createPlanFromGoal(goal, context)
         
         if (autoExecute || intelligenceMode == IntelligenceMode.AUTONOMOUS) {
-            return taskPlanner.executePlan(plan.id, context)
+            return@withContext taskPlanner.executePlan(plan.id, context)
         }
-        return null
+        return@withContext null
     }
 
     /**
@@ -299,7 +304,7 @@ class IntelligenceCoordinator(
         
         // Learn from the interaction
         semanticMemory.remember(
-            content = "Autonomous task: $input\nReasoning: ${reasoningResult.finalAnswer}\nPlan: ${plan?.tasks.size ?: 0} steps\nExecution: ${executionResult?.success ?: false}",
+            content = "Autonomous task: $input\nReasoning: ${reasoningResult.finalAnswer}\nPlan: ${plan?.tasks?.size ?: 0} steps\nExecution: ${executionResult?.success ?: false}",
             label = "Autonomous: ${input.take(50)}",
             context = context,
             source = SemanticMemory.MemorySource.AI_GENERATED,
@@ -327,7 +332,10 @@ class IntelligenceCoordinator(
     ): ConversationContext {
         val memoryContext = memories.map { "[Memory] ${it.label}: ${it.content.take(200)}" }.joinToString("\n")
         return context.copy(
-            recentMessages = context.recentMessages + listOf("System: Relevant memories:\n$memoryContext")
+            recentMessages = context.recentMessages + ChatMessage(
+                sender = Sender.AURA,
+                text = "Relevant memories for this request:\n$memoryContext"
+            )
         )
     }
 
@@ -446,8 +454,5 @@ class IntelligenceCoordinator(
         val toolCount: Int
     )
 
-    interface ContextProvider {
-        fun getCurrentContext(): ConversationContext
-        fun getDeviceState(): ProactiveEngine.DeviceState
-    }
+    interface ContextProvider : ProactiveEngine.ContextProvider
 }
