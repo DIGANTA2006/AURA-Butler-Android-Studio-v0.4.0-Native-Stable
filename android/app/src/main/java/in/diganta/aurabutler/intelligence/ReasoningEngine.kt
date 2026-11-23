@@ -12,8 +12,9 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Advanced reasoning engine with visible chain-of-thought, tool use, and self-verification.
- * Provides structured reasoning traces for complex tasks while maintaining privacy boundaries.
+ * Structured reasoning engine with task analysis, planning, and answer verification.
+ * Tool definitions are metadata only until a real executor is registered; this class
+ * never reports a tool as used when no runtime action was performed.
  */
 class ReasoningEngine(
     private val aiProvider: AiProvider,
@@ -55,8 +56,8 @@ class ReasoningEngine(
     )
 
     /**
-     * Execute a reasoning task with full chain-of-thought visibility.
-     * Returns structured reasoning trace for transparency and debugging.
+     * Execute a reasoning task and return a user-safe process summary.
+     * Internal model reasoning is not exposed as a transcript.
      */
     suspend fun reason(
         task: String,
@@ -212,34 +213,28 @@ class ReasoningEngine(
         var confidence = 0.85
         var requiresConfirmation = false
 
-        // For complex tasks, use AI with tool-calling capability
-        if (options.enableToolUse && toolRegistry.availableTools().isNotEmpty()) {
-            val toolEnhancedPrompt = buildToolEnhancedPrompt(originalTask, planStep.content, context)
-            
-            // This would integrate with AI provider that supports function calling
-            // For now, simulate structured reasoning with available tools
-            val reasoningSteps = performStructuredReasoning(originalTask, context, trace, toolsUsed)
-            currentAnswer = reasoningSteps.lastOrNull()?.content ?: "Unable to complete reasoning."
-            confidence = reasoningSteps.lastOrNull()?.confidence ?: 0.5
+        // ToolRegistry contains capability metadata, not executable handlers.
+        // Until a real executor is injected, always obtain the answer from the AI
+        // provider and make no external/device changes from this reasoning path.
+        val reasoningPrompt = buildReasoningPrompt(originalTask, planStep.content, context)
+        val aiResponse = aiProvider.answer(reasoningPrompt, context)
+
+        if (!aiResponse.isNullOrBlank()) {
+            trace += ReasoningStep(
+                type = StepType.REASONING,
+                content = "AI response received and passed through the response quality gate.",
+                confidence = 0.8
+            )
+            currentAnswer = aiResponse
+            confidence = 0.75
         } else {
-            // Direct AI reasoning without tools
-            val reasoningPrompt = buildReasoningPrompt(originalTask, planStep.content, context)
-            val aiResponse = aiProvider.answer(reasoningPrompt, context)
-            
-            if (aiResponse != null && aiResponse.isNotBlank()) {
-                trace += ReasoningStep(
-                    type = StepType.REASONING,
-                    content = "AI Reasoning: $aiResponse",
-                    confidence = 0.8
-                )
-                currentAnswer = aiResponse
-                confidence = 0.75
-            }
+            currentAnswer = "The configured AI provider did not return an answer. No tools or actions were executed."
+            confidence = 0.25
         }
 
-        // Check if any step requires user confirmation (high-risk actions)
-        requiresConfirmation = trace.any { it.type == StepType.TOOL_USE && 
-            it.toolCall?.let { toolRegistry.requiresConfirmation(it.name) } == true }
+        // No confirmation is requested for a tool action because no tool has
+        // actually been executed by this engine.
+        requiresConfirmation = false
 
         return ExecutionResult(currentAnswer, confidence, requiresConfirmation)
     }
