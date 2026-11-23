@@ -10,6 +10,8 @@ import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.runtime.AiWorkload
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
+import kotlinx.coroutines.CancellationException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -52,7 +54,7 @@ class NewsCommandEngine(
         val topic = parsed.topic
         val mode = parsed.mode
 
-        val batch = runCatching {
+        val batch = runCatchingCancellable {
             provider.fetch(
                 settings = context.settings,
                 topic = topic,
@@ -217,6 +219,9 @@ class NewsCommandEngine(
                         ?.trim()
                         ?.takeIf(String::isNotBlank)
                         ?.also { StudentBudgetGuard.commit(budgetLease) }
+                } catch (cancelled: CancellationException) {
+                    StudentBudgetGuard.release(budgetLease)
+                    throw cancelled
                 } catch (_: Exception) {
                     StudentBudgetGuard.release(budgetLease)
                     null
