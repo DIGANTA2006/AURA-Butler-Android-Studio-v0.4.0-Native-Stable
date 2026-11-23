@@ -3,7 +3,7 @@ package `in`.diganta.aurabutler.analyzer
 import android.content.Context
 import `in`.diganta.aurabutler.data.DetailedNewsProvider
 import `in`.diganta.aurabutler.data.DeepResearchProvider
-import `in`.diganta.aurabutler.data.GeminiAnalyzerProvider
+import `in`.diganta.aurabutler.data.GeminiAiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
 import `in`.diganta.aurabutler.data.LiteResearchEvidence
 import `in`.diganta.aurabutler.data.OpenAiCompatibleProvider
@@ -24,7 +24,7 @@ class UnifiedAnalyzerEngine(context: Context) {
     private val notificationAnalyzer = NotificationAnalyzer(appContext)
     private val news = DetailedNewsProvider()
     private val deepResearch = DeepResearchProvider()
-    private val gemini = GeminiAnalyzerProvider()
+    private val gemini = GeminiAiProvider()
     private val privateQwen = OpenAiCompatibleProvider()
     private val temporalMemory = TemporalMemoryStore(appContext)
 
