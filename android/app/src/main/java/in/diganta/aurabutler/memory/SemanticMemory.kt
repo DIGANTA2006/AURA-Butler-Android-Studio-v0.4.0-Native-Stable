@@ -126,15 +126,27 @@ class SemanticMemory(
     ): RetrievalResult = withContext(Dispatchers.IO) {
         require(query.isNotBlank()) { "Memory recall query cannot be blank." }
         val allEntries = memoryStore.getAll()
+        val requestedTimeRange = options.timeRange
+        if (
+            requestedTimeRange != null &&
+            requestedTimeRange.start > requestedTimeRange.end
+        ) {
+            return@withContext RetrievalResult(
+                entries = emptyList(),
+                query = query,
+                strategy = options.strategy,
+                totalCandidates = allEntries.size
+            )
+        }
         val queryEmbedding = embeddingProvider.embed(query.take(MAX_QUERY_CHARS))
         val maxResults = options.maxResults.coerceIn(1, MAX_RECALL_RESULTS)
         val minScore = options.minScore.coerceIn(0.0, 1.0)
         val semanticWeight = options.semanticWeight.coerceIn(0.0, 1.0)
-        val timeRange = options.timeRange?.takeIf { it.start <= it.end }
 
         val scored = allEntries.asSequence()
             .filter { entry ->
-                timeRange == null || entry.createdAt in timeRange.start..timeRange.end
+                requestedTimeRange == null ||
+                    entry.createdAt in requestedTimeRange.start..requestedTimeRange.end
             }
             .mapNotNull { entry ->
                 entry.embedding?.let { embedding ->
@@ -859,39 +871,86 @@ private object HashedTextVectorizer {
  * Entries are lost when the process exits; encrypted persistent integration
  * with PrivateMemoryStore remains a separate implementation task.
  */
-class MemoryStore {
-    private val memories = ConcurrentHashMap<String, SemanticMemory.MemoryEntry>()
-    private val accessOrder = ConcurrentHashMap<String, Long>()
-    
+class MemoryStore(
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES
+) {
+    private val memories = mutableMapOf<String, SemanticMemory.MemoryEntry>()
+    private val accessOrder = mutableMapOf<String, Long>()
+    private var accessSequence = 0L
+
+    init {
+        require(maxEntries > 0) { "MemoryStore capacity must be positive." }
+    }
+
+    @Synchronized
     fun save(entry: SemanticMemory.MemoryEntry) {
         memories[entry.id] = entry
-        accessOrder[entry.id] = System.currentTimeMillis()
+        touch(entry.id)
+        evictLeastRecentlyUsed()
     }
-    
-    fun get(id: String): SemanticMemory.MemoryEntry? = memories[id]
-    
+
+    @Synchronized
+    fun get(id: String): SemanticMemory.MemoryEntry? {
+        val entry = memories[id] ?: return null
+        touch(id)
+        return entry
+    }
+
+    @Synchronized
     fun getAll(): List<SemanticMemory.MemoryEntry> = memories.values.toList()
-    
+
+    @Synchronized
     fun updateAccess(id: String) {
         memories[id]?.let { entry ->
-            val updated = entry.copy(
+            memories[id] = entry.copy(
                 accessCount = entry.accessCount + 1,
                 lastAccessed = System.currentTimeMillis()
             )
-            memories[id] = updated
-            accessOrder[id] = System.currentTimeMillis()
+            touch(id)
         }
     }
-    
+
+    @Synchronized
     fun delete(id: String) {
         memories.remove(id)
         accessOrder.remove(id)
     }
-    
+
+    @Synchronized
     fun clear() {
         memories.clear()
         accessOrder.clear()
+        accessSequence = 0L
     }
-    
+
+    @Synchronized
     fun size(): Int = memories.size
+
+    private fun touch(id: String) {
+        // Rebase before overflow while preserving access order.
+        if (accessSequence == Long.MAX_VALUE) {
+            val ordered = accessOrder.entries.sortedBy { it.value }
+            accessOrder.clear()
+            ordered.forEachIndexed { index, entry ->
+                accessOrder[entry.key] = index.toLong() + 1L
+            }
+            accessSequence = ordered.size.toLong()
+        }
+        accessSequence++
+        accessOrder[id] = accessSequence
+    }
+
+    private fun evictLeastRecentlyUsed() {
+        while (memories.size > maxEntries) {
+            val oldestId = accessOrder.minByOrNull { it.value }?.key
+                ?: memories.keys.firstOrNull()
+                ?: return
+            memories.remove(oldestId)
+            accessOrder.remove(oldestId)
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_MAX_ENTRIES = 2_000
+    }
 }
