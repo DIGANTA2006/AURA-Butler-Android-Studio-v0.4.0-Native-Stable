@@ -799,8 +799,12 @@ class WakeWordService : Service() {
             }
 
             VoiceCommandClassifier.ControlIntent.NONE -> {
+                val wasAwaitingCompletion = awaitingCommandCompletion
                 val assessment = VoiceCommandClassifier.assess(command)
-                if (remainingSpeech.isNotBlank()) {
+                // Do not queue the tail of the clarification prompt itself.
+                // Keep only the original interrupted response while the owner
+                // completes the command that interrupted it.
+                if (!wasAwaitingCompletion && remainingSpeech.isNotBlank()) {
                     speechContinuations.push(remainingSpeech)
                 }
 
