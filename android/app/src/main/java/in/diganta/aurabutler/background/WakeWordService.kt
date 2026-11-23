@@ -82,6 +82,9 @@ class WakeWordService : Service() {
     private var speechPaused = false
 
     @Volatile
+    private var awaitingCommandCompletion = false
+
+    @Volatile
     private var activeRecorder: AudioRecord? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -287,6 +290,7 @@ class WakeWordService : Service() {
                         VoiceCommandClassifier.ControlIntent.STOP_LISTENING -> {
                             speechContinuations.clear()
                             speechPaused = false
+                            awaitingCommandCompletion = false
                             store.saveSettings(store.loadSettings().copy(wakeWordEnabled = false))
                             speakIfEnabled("Wake listening is now off.")
                             sendBroadcast(
@@ -298,6 +302,7 @@ class WakeWordService : Service() {
                         VoiceCommandClassifier.ControlIntent.STOP_SPEECH -> {
                             speechContinuations.clear()
                             speechPaused = false
+                            awaitingCommandCompletion = false
                             updateNotification("Speech queue cleared")
                         }
 
@@ -327,11 +332,13 @@ class WakeWordService : Service() {
                         VoiceCommandClassifier.ControlIntent.NONE -> {
                             val assessment = VoiceCommandClassifier.assess(transcript)
                             if (!assessment.isComplete) {
+                                awaitingCommandCompletion = true
                                 Log.i(TAG, "Deferred incomplete voice command: ${assessment.reason}")
                                 speakIfEnabled(
                                     "Your instruction seems incomplete. Please finish your command."
                                 )
                             } else {
+                                awaitingCommandCompletion = false
                                 updateNotification("Handling: ${transcript.take(70)}")
                                 val result = processor.process(transcript)
                                 if (result.shouldSpeak) {
@@ -638,6 +645,7 @@ class WakeWordService : Service() {
         pendingSpeech.set(null)
         speechContinuations.clear()
         speechPaused = false
+        awaitingCommandCompletion = false
         runCatching { activeRecorder?.stop() }
         if (::fastSpeaker.isInitialized) fastSpeaker.stop()
         AuraVoiceRuntime.speaker.stop()
@@ -746,6 +754,7 @@ class WakeWordService : Service() {
             VoiceCommandClassifier.ControlIntent.STOP_LISTENING -> {
                 speechContinuations.clear()
                 speechPaused = false
+                awaitingCommandCompletion = false
                 store.saveSettings(
                     store.loadSettings().copy(wakeWordEnabled = false)
                 )
@@ -759,6 +768,7 @@ class WakeWordService : Service() {
             VoiceCommandClassifier.ControlIntent.STOP_SPEECH -> {
                 speechContinuations.clear()
                 speechPaused = false
+                awaitingCommandCompletion = false
                 updateNotification("Previous reply stopped")
                 AuraRuntimeStateMachine.forceIdle("owner stopped current speech")
             }
@@ -795,6 +805,7 @@ class WakeWordService : Service() {
                 }
 
                 if (!assessment.isComplete) {
+                    awaitingCommandCompletion = true
                     Log.i(TAG, "Deferred incomplete barge-in command: ${assessment.reason}")
                     updateNotification("The command seems incomplete • please finish it")
                     AuraRuntimeStateMachine.safeTransition(
@@ -808,6 +819,7 @@ class WakeWordService : Service() {
                     return
                 }
 
+                awaitingCommandCompletion = false
                 updateNotification(
                     "Handling interrupted command: " + command.take(60)
                 )
@@ -845,7 +857,7 @@ class WakeWordService : Service() {
      * A pause deliberately holds the queue; stop/cancel clears it.
      */
     private suspend fun resumePendingSpeechIfAny(bargeInDepth: Int) {
-        if (!running || speechPaused) return
+        if (!running || speechPaused || awaitingCommandCompletion) return
         val continuation = speechContinuations.pop() ?: return
         if (continuation.isBlank()) {
             resumePendingSpeechIfAny(bargeInDepth)
