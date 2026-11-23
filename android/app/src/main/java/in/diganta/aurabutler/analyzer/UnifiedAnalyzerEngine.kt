@@ -15,6 +15,8 @@ import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.runtime.AiWorkload
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
+import kotlinx.coroutines.CancellationException
 import java.time.ZoneId
 import java.util.Locale
 import java.util.UUID
@@ -264,7 +266,7 @@ class UnifiedAnalyzerEngine(context: Context) {
             var liteEvidence: LiteResearchEvidence? = null
 
             if (privateReady) {
-                val researched = runCatching {
+                val researched = runCatchingCancellable {
                     deepResearch.research(
                         query = query,
                         settings = settings,
@@ -290,7 +292,7 @@ class UnifiedAnalyzerEngine(context: Context) {
                 // exposing a Gemini quota/error bubble: perform CPU-only
                 // private SearXNG search, then spend one remaining Qwen TEXT
                 // request to synthesize the evidence with citations.
-                liteEvidence = runCatching {
+                liteEvidence = runCatchingCancellable {
                     deepResearch.searchLiteEvidence(query, settings, limit = 6)
                 }.getOrNull()
 
@@ -314,7 +316,7 @@ class UnifiedAnalyzerEngine(context: Context) {
             // swallowed and the already-retrieved private evidence remains
             // available as the next fallback.
             if (geminiReady) {
-                val grounded = runCatching {
+                val grounded = runCatchingCancellable {
                     gemini.detailedNews(topic, settings, limit = 5)
                 }
                 grounded.getOrNull()?.let { result ->
@@ -336,7 +338,7 @@ class UnifiedAnalyzerEngine(context: Context) {
                 )
             }
 
-            val fallback = runCatching { news.keylessDigest(topic, limit = 6) }
+            val fallback = runCatchingCancellable { news.keylessDigest(topic, limit = 6) }
                 .getOrElse {
                     return localReply(
                         text = privateFailure
@@ -381,7 +383,7 @@ class UnifiedAnalyzerEngine(context: Context) {
                         settings.researchMode
                     )
                 }
-                val researched = runCatching {
+                val researched = runCatchingCancellable {
                     deepResearch.research(query, settings, mode)
                 }
                 researched.getOrNull()?.let { result ->
@@ -394,7 +396,7 @@ class UnifiedAnalyzerEngine(context: Context) {
                 }
                 privateFailure = researched.exceptionOrNull()?.message?.take(260)
 
-                liteEvidence = runCatching {
+                liteEvidence = runCatchingCancellable {
                     deepResearch.searchLiteEvidence(query, settings, limit = 7)
                 }.getOrNull()
 
@@ -421,7 +423,7 @@ class UnifiedAnalyzerEngine(context: Context) {
                     HybridAiProvider.PROVIDER_GEMINI
                 )
             ) {
-                val fallback = runCatching {
+                val fallback = runCatchingCancellable {
                     gemini.groundedResearch(query, settings, detailed = true)
                 }
                 fallback.getOrNull()?.let { result ->
@@ -657,6 +659,9 @@ class UnifiedAnalyzerEngine(context: Context) {
                 ?.trim()
                 ?.takeIf(String::isNotBlank)
                 ?.also { StudentBudgetGuard.commit(budgetLease) }
+        } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
+            throw cancelled
         } catch (error: Exception) {
             StudentBudgetGuard.release(budgetLease)
             null
