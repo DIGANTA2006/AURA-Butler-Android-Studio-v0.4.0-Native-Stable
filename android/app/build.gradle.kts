@@ -14,8 +14,8 @@ android {
         applicationId = "in.diganta.aurabutler"
         minSdk = 26
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.17.2-reliability-latency"
+        versionCode = 28
+        versionName = "0.17.3-voice-continuity"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["usesCleartextTraffic"] = "false"
