@@ -264,9 +264,13 @@ class ProactiveEngine(
             name = "Memory Consolidation",
             description = "Consolidates memories, extracts patterns, applies forgetting curve",
             schedule = AgentSchedule.DAILY,
-            task = { ctx ->
-                // This would call semanticMemory.consolidate()
-                AgentResult(true, "Memory consolidation completed")
+            task = { _ ->
+                val result = semanticMemory.consolidate()
+                AgentResult(
+                    success = result.errors.isEmpty(),
+                    output = "Memory consolidation: merged ${result.mergedCount}, patterns ${result.patternsFound}, concepts ${result.conceptsCreated}, decayed ${result.decayedCount}.",
+                    error = result.errors.takeIf { it.isNotEmpty() }?.joinToString("; ")
+                )
             }
         ))
 
@@ -395,21 +399,20 @@ class ProactiveEngine(
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = successAgent
-                
-                // Add generated suggestions
+
+                // Add generated suggestions only after successful agent execution.
                 result.suggestions.forEach { suggestions[it.id] = it }
-                
-                // Execute suggested actions if high confidence and auto-execute enabled
-                if (settings.proactiveAutoExecute) {
-                    result.actions.filter { it.requiresConfirmation == false && result.suggestions.any { s -> s.confidence > 0.8 } }
-                        .forEach { executeAction(it, ConversationContext.empty()) }
-                }
+
+                // The current engine has no action executor. Keep auto-execution
+                // disabled here; suggestions must never be reported as performed.
+                if (running && successAgent.enabled) scheduleAgent(successAgent)
             } catch (e: Exception) {
                 val errorAgent = updatedAgent.copy(
                     errorCount = updatedAgent.errorCount + 1,
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = errorAgent
+                if (running && errorAgent.enabled) scheduleAgent(errorAgent)
             }
         }
     }
