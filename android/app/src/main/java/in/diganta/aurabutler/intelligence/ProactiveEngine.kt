@@ -80,7 +80,7 @@ class ProactiveEngine(
     data class SuggestionContext(
         val trigger: Trigger,
         val relatedMemoryIds: List<String> = emptyList(),
-        val timeRelevance: TimeRelevance = TimeRelevance.ANYTIME,
+        val timeRelevance: TimeRelevance = ProactiveEngine.TimeRelevance.ANYTIME,
         val locationRelevance: String? = null
     )
 
@@ -279,7 +279,7 @@ class ProactiveEngine(
                         title = "Low Battery",
                         description = "Battery at ${ctx.deviceState.batteryLevel}%. Consider enabling battery saver.",
                         action = ProactiveAction(
-                            type = ActionType.SHOW_NOTIFICATION,
+                            type = ProactiveEngine.ActionType.SHOW_NOTIFICATION,
                             payload = mapOf("message" to "Battery low: ${ctx.deviceState.batteryLevel}%"),
                             requiresConfirmation = false
                         ),
@@ -305,7 +305,7 @@ class ProactiveEngine(
                         title = "Low Storage",
                         description = "Only ${String.format("%.1f", ctx.deviceState.storageFreePercent)}% storage free. Consider clearing cache or unused apps.",
                         action = ProactiveAction(
-                            type = ActionType.OPEN_APP,
+                            type = ProactiveEngine.ActionType.OPEN_APP,
                             payload = mapOf("app" to "Settings > Storage"),
                             requiresConfirmation = true
                         ),
@@ -463,7 +463,7 @@ class ProactiveEngine(
                     title = "Good Morning",
                     description = "Would you like your daily briefing with weather, schedule, and priorities?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Show daily briefing?"),
                         requiresConfirmation = true
                     ),
@@ -471,7 +471,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = TimeRelevance.MORNING
+                        timeRelevance = ProactiveEngine.TimeRelevance.MORNING
                     )
                 )
             }
@@ -482,7 +482,7 @@ class ProactiveEngine(
                     title = "Lunch Break",
                     description = "Time for a break. Want me to set a timer or find nearby food?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Set lunch timer or find food?"),
                         requiresConfirmation = true
                     ),
@@ -490,7 +490,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.AFTERNOON
+                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.AFTERNOON
                     )
                 )
             }
@@ -501,7 +501,7 @@ class ProactiveEngine(
                     title = "Evening Wrap-up",
                     description = "Review today's accomplishments and plan tomorrow?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Show evening summary?"),
                         requiresConfirmation = true
                     ),
@@ -509,7 +509,7 @@ class ProactiveEngine(
                     priority = Priority.MEDIUM,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.EVENING
+                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.EVENING
                     )
                 )
             }
@@ -520,7 +520,7 @@ class ProactiveEngine(
                     title = "Night Mode",
                     description = "Enable do not disturb and set morning alarm?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Enable night mode?"),
                         requiresConfirmation = true
                     ),
@@ -528,7 +528,7 @@ class ProactiveEngine(
                     priority = Priority.LOW,
                     context = SuggestionContext(
                         trigger = Trigger.TIME_BASED,
-                        timeRelevance = SuggestionContext.TimeRelevance.NIGHT
+                        timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.NIGHT
                     )
                 )
             }
@@ -561,7 +561,7 @@ class ProactiveEngine(
                     title = "Recurring Topic: $topic",
                     description = "You've mentioned '$topic' $count times recently. Want to create a project or research note?",
                     action = ProactiveAction(
-                        type = ActionType.ASK_QUESTION,
+                        type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Create project for $topic?"),
                         requiresConfirmation = true
                     ),
@@ -588,7 +588,7 @@ class ProactiveEngine(
                 title = "Critical Battery",
                 description = "Battery at ${state.batteryLevel}%. Connect charger immediately.",
                 action = ProactiveAction(
-                    type = ActionType.SHOW_NOTIFICATION,
+                    type = ProactiveEngine.ActionType.SHOW_NOTIFICATION,
                     payload = mapOf("message" to "Critical battery: ${state.batteryLevel}%"),
                     requiresConfirmation = false
                 ),
@@ -604,7 +604,7 @@ class ProactiveEngine(
                 title = "Critical Storage",
                 description = "Only ${String.format("%.1f", state.storageFreePercent)}% free. Device may become unstable.",
                 action = ProactiveAction(
-                    type = ActionType.OPEN_APP,
+                    type = ProactiveEngine.ActionType.OPEN_APP,
                     payload = mapOf("app" to "Settings > Storage"),
                     requiresConfirmation = true
                 ),
@@ -625,7 +625,7 @@ class ProactiveEngine(
             title = "Daily Briefing Ready",
             description = "Your morning summary is ready with weather, schedule, and top priorities.",
             action = ProactiveAction(
-                type = ActionType.SHOW_INSIGHT,
+                type = ProactiveEngine.ActionType.SHOW_INSIGHT,
                 payload = mapOf(
                     "type" to "daily_briefing",
                     "weather" to "Sunny, 22°C",
@@ -638,7 +638,7 @@ class ProactiveEngine(
             priority = Priority.HIGH,
             context = SuggestionContext(
                 trigger = Trigger.TIME_BASED,
-                timeRelevance = SuggestionContext.TimeRelevance.MORNING
+                timeRelevance = SuggestionContext.ProactiveEngine.TimeRelevance.MORNING
             )
         )
         
@@ -654,7 +654,7 @@ class ProactiveEngine(
             title = "Automation Opportunity",
             description = "You often open YouTube and search for music after saying 'play'. Want a shortcut?",
             action = ProactiveAction(
-                type = ActionType.ASK_QUESTION,
+                type = ProactiveEngine.ActionType.ASK_QUESTION,
                 payload = mapOf("question" to "Create 'play music' shortcut?"),
                 requiresConfirmation = true
             ),
@@ -675,10 +675,10 @@ class ProactiveEngine(
         // Check time relevance
         val hour = java.time.LocalDateTime.now().hour
         when (suggestion.context.timeRelevance) {
-            SuggestionContext.TimeRelevance.MORNING -> if (hour !in 6..11) return false
-            SuggestionContext.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
-            SuggestionContext.TimeRelevance.EVENING -> if (hour !in 17..21) return false
-            SuggestionContext.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
+            SuggestionContext.ProactiveEngine.TimeRelevance.MORNING -> if (hour !in 6..11) return false
+            SuggestionContext.ProactiveEngine.TimeRelevance.AFTERNOON -> if (hour !in 12..17) return false
+            SuggestionContext.ProactiveEngine.TimeRelevance.EVENING -> if (hour !in 17..21) return false
+            SuggestionContext.ProactiveEngine.TimeRelevance.NIGHT -> if (hour !in 22..23 && hour !in 0..5) return false
             else -> {}
         }
         
@@ -689,16 +689,16 @@ class ProactiveEngine(
     private suspend fun executeAction(action: ProactiveAction, context: ConversationContext) {
         // In production, integrate with action execution system
         when (action.type) {
-            ActionType.SHOW_NOTIFICATION -> {
+            ProactiveEngine.ActionType.SHOW_NOTIFICATION -> {
                 // Show notification
             }
-            ProactiveAction.ActionType.ASK_QUESTION -> {
+            ProactiveEngine.ActionType.ASK_QUESTION -> {
                 // Queue question for next interaction
             }
-            ProactiveAction.ActionType.RUN_COMMAND -> {
+            ProactiveEngine.ActionType.RUN_COMMAND -> {
                 // Execute command
             }
-            ProactiveAction.ActionType.OPEN_APP -> {
+            ProactiveEngine.ActionType.OPEN_APP -> {
                 // Open app
             }
             else -> {}
