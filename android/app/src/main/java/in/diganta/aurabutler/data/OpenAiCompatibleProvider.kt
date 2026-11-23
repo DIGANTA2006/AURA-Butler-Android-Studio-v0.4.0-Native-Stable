@@ -3,7 +3,9 @@
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.Sender
 import `in`.diganta.aurabutler.runtime.ResponseQualityGate
+import `in`.diganta.aurabutler.runtime.AiWorkload
 import `in`.diganta.aurabutler.runtime.SafeEndpointValidator
+import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import java.io.BufferedReader
 import java.io.IOException
@@ -27,12 +29,21 @@ class OpenAiCompatibleProvider : AiProvider {
         if (!settings.aiEnabled || !settings.localAiEnabled) return@withContext null
         val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(settings.localAiEndpoint)
         val model = settings.localAiModel.trim().ifBlank { DEFAULT_MODEL }
+        val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.TEXT, endpoint)
+        if (!budgetLease.allowed) throw IOException(budgetLease.message)
         try {
-            execute(endpoint, model, message, context)
+            val result = execute(endpoint, model, message, context)
+            StudentBudgetGuard.commit(budgetLease)
+            result
         } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
             throw cancelled
-        } catch (error: IllegalArgumentException) {
-            throw IOException(error.message ?: "The private AI endpoint is unsafe.")
+        } catch (error: Exception) {
+            StudentBudgetGuard.release(budgetLease)
+            if (error is IllegalArgumentException) {
+                throw IOException(error.message ?: "The private AI endpoint is unsafe.")
+            }
+            throw error
         }
     }
 
@@ -45,36 +56,49 @@ class OpenAiCompatibleProvider : AiProvider {
         if (!settings.aiEnabled || !settings.localAiEnabled) return@withContext null
         val endpoint = SafeEndpointValidator.normalizeOpenAiEndpoint(settings.localAiEndpoint)
         val model = settings.localAiModel.trim().ifBlank { DEFAULT_MODEL }
+        val budgetLease = StudentBudgetGuard.tryReserve(AiWorkload.TEXT, endpoint)
+        if (!budgetLease.allowed) throw IOException(budgetLease.message)
+
         val detailed = ButlerSystemPrompt.normalizeStyle(settings.responseStyle) == "detailed"
         // Complex engineering turns use Qwen's hidden thinking mode and a larger
         // completion budget. Simple chat keeps low-latency SSE streaming.
-        if (
-            detailed ||
-            isComplexEngineeringRequest(message)
-        ) {
-            return@withContext execute(endpoint, model, message, context)
-        }
-
-        var emittedVisibleText = false
         try {
-            executeStreaming(endpoint, model, message, context) { delta ->
-                if (delta.isNotBlank()) emittedVisibleText = true
-                onDelta(delta)
+            val result = if (
+                detailed ||
+                isComplexEngineeringRequest(message)
+            ) {
+                execute(endpoint, model, message, context)
+            } else {
+                var emittedVisibleText = false
+                try {
+                    executeStreaming(endpoint, model, message, context) { delta ->
+                        if (delta.isNotBlank()) emittedVisibleText = true
+                        onDelta(delta)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    // A retry is safe only before any visible SSE text has
+                    // reached the user. Retrying after partial output can duplicate
+                    // assistant text and consume a second inference request.
+                    if (emittedVisibleText) {
+                        throw IOException(
+                            "The private AI stream was interrupted after partial output. " +
+                                "Please retry this turn instead of duplicating it.",
+                            error
+                        )
+                    }
+                    execute(endpoint, model, message, context)
+                }
             }
+            StudentBudgetGuard.commit(budgetLease)
+            result
         } catch (cancelled: CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
             throw cancelled
         } catch (error: Exception) {
-            // A fallback retry is safe only before any visible SSE text has
-            // reached the user. Retrying after partial output can duplicate
-            // compute, budget and assistant text.
-            if (emittedVisibleText) {
-                throw IOException(
-                    "The private AI stream was interrupted after partial output. " +
-                        "Please retry this turn instead of duplicating it.",
-                    error
-                )
-            }
-            execute(endpoint, model, message, context)
+            StudentBudgetGuard.release(budgetLease)
+            throw error
         }
     }
 
