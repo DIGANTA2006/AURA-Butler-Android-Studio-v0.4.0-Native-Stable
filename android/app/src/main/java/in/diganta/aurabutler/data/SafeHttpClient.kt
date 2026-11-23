@@ -213,6 +213,6 @@ object SafeHttpClient {
 
     const val DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
     const val MAX_ALLOWED_RESPONSE_BYTES = 8 * 1024 * 1024
-    const val MAX_ALLOWED_REQUEST_BYTES = 8 * 1024 * 1024
+    const val MAX_ALLOWED_REQUEST_BYTES = 16 * 1024 * 1024
     private const val MAX_TIMEOUT_MS = 5 * 60 * 1_000
 }
