@@ -33,6 +33,18 @@ jobs:
       - name: Install Android 36 SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Restore pinned sherpa-onnx AAR
+        working-directory: android
+        shell: bash
+        run: |
+          mkdir -p app/libs
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-1.13.4.aar" \
+            --output app/libs/sherpa-onnx-v1.13.4.aar
+          expected="$(awk '$2 == "./android/app/libs/sherpa-onnx-v1.13.4.aar" { print $1 }' ../SHA256SUMS-SOURCE.txt)"
+          test -n "$expected"
+          printf '%s  %s\\n' "$expected" "app/libs/sherpa-onnx-v1.13.4.aar" | sha256sum --check --strict
+
       - name: Run unit tests
         working-directory: android
         run: bash ./gradlew --no-daemon testDebugUnitTest
