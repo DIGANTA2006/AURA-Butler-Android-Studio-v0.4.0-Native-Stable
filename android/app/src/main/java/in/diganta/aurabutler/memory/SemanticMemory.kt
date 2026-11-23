@@ -450,7 +450,7 @@ class SemanticMemory(
         )
     }
 
-    private data class PatternResult(
+    internal data class PatternResult(
         val patternsFound: Int,
         val conceptsCreated: Int,
         val errors: List<String>
