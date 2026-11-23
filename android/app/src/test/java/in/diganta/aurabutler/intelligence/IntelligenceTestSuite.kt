@@ -159,6 +159,7 @@ class IntelligenceTestSuite {
             SemanticMemory.RecallOptions(
                 maxResults = 3,
                 minScore = 0.0,
+                semanticWeight = 0.0,
                 strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
             )
         )
@@ -185,6 +186,7 @@ class IntelligenceTestSuite {
             SemanticMemory.RecallOptions(
                 maxResults = 2,
                 minScore = 0.0,
+                semanticWeight = 0.0,
                 strategy = SemanticMemory.RetrievalStrategy.HYBRID
             )
         )
@@ -213,6 +215,7 @@ class IntelligenceTestSuite {
             SemanticMemory.RecallOptions(
                 maxResults = 5,
                 minScore = 0.0,
+                semanticWeight = 0.0,
                 strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
             )
         )
@@ -413,6 +416,7 @@ class IntelligenceTestSuite {
             context,
             SemanticMemory.RecallOptions(
                 minScore = 0.0,
+                semanticWeight = 0.0,
                 strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
             )
         )
