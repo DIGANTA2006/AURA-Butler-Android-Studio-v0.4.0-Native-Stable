@@ -395,7 +395,7 @@ class TaskPlanner(
         val planStep = trace.firstOrNull { it.type == ReasoningEngine.StepType.PLANNING }
         if (planStep != null) {
             val lines = planStep.content.lines()
-                .map(String::trim)
+                .map { it.trim() }
                 .filter { Regex("^\\d+\\.\\s+.+$").matches(it) }
                 .map { it.replaceFirst(Regex("^\\d+\\.\\s*"), "").trim() }
                 .filter(String::isNotBlank)
