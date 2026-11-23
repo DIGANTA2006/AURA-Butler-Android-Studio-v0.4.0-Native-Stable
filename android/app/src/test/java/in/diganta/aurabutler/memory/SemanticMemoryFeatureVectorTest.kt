@@ -1,9 +1,7 @@
 package `in`.diganta.aurabutler.memory
 
-import `in`.diganta.aurabutler.data.AiProvider
-import `in`.diganta.aurabutler.model.ButlerSettings
-import `in`.diganta.aurabutler.model.ConversationContext
-import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -26,95 +24,104 @@ class SemanticMemoryFeatureVectorTest {
     }
 
     @Test
-    fun consolidationCreatesConceptsOnlyFromVerifiedExistingMemoryLinks() = runBlocking {
-        val settings = ButlerSettings(aiEnabled = true)
-        val context = ConversationContext(
-            recentMessages = emptyList(),
-            memories = emptyList(),
-            settings = settings
-        )
+    fun parserCreatesConceptOnlyFromExistingReferencedMemories() {
         val store = MemoryStore()
-        val provider = LocalEmbeddingProvider("unused")
-        lateinit var entries: List<SemanticMemory.MemoryEntry>
-
-        val ai = object : AiProvider {
-            override suspend fun answer(
-                message: String,
-                context: ConversationContext
-            ): String? {
-                if (!message.startsWith("Analyze these memory entries")) {
-                    return """{"relatedEntities":[],"temporalTags":[],"sentiment":0,"confidence":0.6}"""
-                }
-                val ids = entries
-                val payload = org.json.JSONObject()
-                    .put(
-                        "patterns",
-                        org.json.JSONArray().put(
-                            org.json.JSONObject()
-                                .put("theme", "Reliable execution")
-                                .put("memoryIds", org.json.JSONArray().put(ids[0].id).put(ids[4].id))
-                                .put("confidence", 0.92)
-                        )
-                    )
-                    .put(
-                        "concepts",
-                        org.json.JSONArray().put(
-                            org.json.JSONObject()
-                                .put("name", "Execution safety")
-                                .put(
-                                    "description",
-                                    "Reliable task execution preserves explicit cancellation state."
-                                )
-                                .put(
-                                    "relatedMemoryIds",
-                                    org.json.JSONArray().put(ids[0].id).put(ids[4].id)
-                                )
-                        )
-                    )
-                return payload.toString()
-            }
-        }
-
-        val memory = SemanticMemory(ai, provider, store)
-        entries = listOf(
-            memory.remember(
-                "Kotlin coroutine cancellation should propagate through child tasks.",
-                "Coroutine cancellation",
-                context
+        val memory = SemanticMemory(null, LocalEmbeddingProvider("unused"), store)
+        val entries = listOf(
+            SemanticMemory.MemoryEntry(
+                id = "memory-coroutines",
+                content = "Kotlin coroutine cancellation propagates through child tasks.",
+                label = "Coroutine cancellation"
             ),
-            memory.remember(
-                "Android foreground service keeps the wake word detector alive.",
-                "Wake service",
-                context
-            ),
-            memory.remember(
-                "Private memory uses AES GCM with Android Keystore encryption.",
-                "Private storage",
-                context
-            ),
-            memory.remember(
-                "Network requests use bounded timeouts and response sizes.",
-                "Network bounds",
-                context
-            ),
-            memory.remember(
-                "Task plans should persist completed checkpoints for recovery.",
-                "Plan recovery",
-                context
+            SemanticMemory.MemoryEntry(
+                id = "memory-plans",
+                content = "Task plans persist completed checkpoints for recovery.",
+                label = "Plan recovery"
             )
         )
+        val response = JSONObject()
+            .put(
+                "patterns",
+                JSONArray().put(
+                    JSONObject()
+                        .put("theme", "Reliable execution")
+                        .put("memoryIds", JSONArray().put("memory-coroutines").put("memory-plans"))
+                        .put("confidence", 0.92)
+                )
+            )
+            .put(
+                "concepts",
+                JSONArray().put(
+                    JSONObject()
+                        .put("name", "Execution safety")
+                        .put(
+                            "description",
+                            "Reliable task execution preserves explicit cancellation state."
+                        )
+                        .put(
+                            "relatedMemoryIds",
+                            JSONArray().put("memory-coroutines").put("memory-plans")
+                        )
+                )
+            )
+            .toString()
 
-        val result = memory.consolidate()
-        println("SEMANTIC_MEMORY_TEST_DIAGNOSTIC result=" + result + "; labels=" + store.getAll().map { it.label })
-        val concept = store.getAll().firstOrNull {
+        val result = memory.parsePatternResponse(response, entries)
+        val concept = store.getAll().singleOrNull {
             it.source == SemanticMemory.MemorySource.CONSOLIDATED &&
                 it.label == "Concept: Execution safety"
         }
 
-        assertEquals("No valid pattern was parsed; check the provider prompt and response.", 1, result.patternsFound)
-        assertEquals("No concept passed validation or was stored.", 1, result.conceptsCreated)
-        assertTrue("Expected a stored linked concept.", concept != null)
-        assertTrue("Stored concept does not contain the expected source-memory labels.", concept!!.metadata.relatedEntities.containsAll(listOf("Coroutine cancellation", "Plan recovery")))
+        assertEquals(1, result.patternsFound)
+        assertEquals(1, result.conceptsCreated)
+        assertTrue("Expected exactly one validated concept.", concept != null)
+        assertTrue(
+            concept!!.metadata.relatedEntities.containsAll(
+                listOf("Coroutine cancellation", "Plan recovery")
+            )
+        )
+    }
+
+    @Test
+    fun parserRejectsConceptsThatReferenceUnknownMemoryIds() {
+        val store = MemoryStore()
+        val memory = SemanticMemory(null, LocalEmbeddingProvider("unused"), store)
+        val entries = listOf(
+            SemanticMemory.MemoryEntry(
+                id = "memory-one",
+                content = "A real memory with sufficient detail.",
+                label = "Real memory"
+            )
+        )
+        val response = JSONObject()
+            .put(
+                "patterns",
+                JSONArray().put(
+                    JSONObject()
+                        .put("theme", "Unverified theme")
+                        .put("memoryIds", JSONArray().put("memory-one").put("invented-memory"))
+                        .put("confidence", 0.99)
+                )
+            )
+            .put(
+                "concepts",
+                JSONArray().put(
+                    JSONObject()
+                        .put("name", "Unverified concept")
+                        .put("description", "This concept references an invented memory identifier.")
+                        .put(
+                            "relatedMemoryIds",
+                            JSONArray().put("memory-one").put("invented-memory")
+                        )
+                )
+            )
+            .toString()
+
+        val result = memory.parsePatternResponse(response, entries)
+
+        assertEquals(0, result.patternsFound)
+        assertEquals(0, result.conceptsCreated)
+        assertTrue(store.getAll().isEmpty())
     }
 
     private fun cosine(a: FloatArray, b: FloatArray): Double {
