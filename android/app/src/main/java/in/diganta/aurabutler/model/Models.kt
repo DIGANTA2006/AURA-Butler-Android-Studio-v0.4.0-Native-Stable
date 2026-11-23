@@ -204,7 +204,16 @@ data class ConversationContext(
     val recentMessages: List<ChatMessage>,
     val memories: List<MemoryItem>,
     val settings: ButlerSettings
-)
+) {
+    companion object {
+        fun empty(settings: ButlerSettings = ButlerSettings()): ConversationContext =
+            ConversationContext(
+                recentMessages = emptyList(),
+                memories = emptyList(),
+                settings = settings
+            )
+    }
+}
 
 enum class AppTab {
     BUTLER,
