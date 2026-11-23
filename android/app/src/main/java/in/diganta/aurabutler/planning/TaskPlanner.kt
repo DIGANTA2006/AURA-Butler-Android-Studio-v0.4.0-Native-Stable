@@ -11,8 +11,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Advanced planning system with persistent task graphs, checkpoints, and autonomous execution.
- * Supports multi-step plans with dependencies, rollback, and progress tracking.
+ * Multi-step planning with dependency validation, checkpoints, and progress tracking.
+ * Execution is limited to the task handlers with real implementations; unsupported
+ * executor types fail explicitly rather than reporting simulated success.
  */
 class TaskPlanner(
     private val reasoningEngine: ReasoningEngine,
@@ -394,8 +395,10 @@ class TaskPlanner(
         val planStep = trace.firstOrNull { it.type == ReasoningEngine.StepType.PLANNING }
         if (planStep != null) {
             val lines = planStep.content.lines()
-                .filter { it.trim().matches(Regex("^\\d+\\.")) }
-                .map { it.trim().substringAfter(".").trim() }
+                .map(String::trim)
+                .filter { Regex("^\\d+\\.\\s+.+$").matches(it) }
+                .map { it.replaceFirst(Regex("^\\d+\\.\\s*"), "").trim() }
+                .filter(String::isNotBlank)
             
             var previousId: String? = null
             for ((index, line) in lines.withIndex()) {
@@ -453,9 +456,16 @@ class TaskPlanner(
     }
 
     private fun buildDependencyGraph(tasks: List<TaskNode>): Map<String, Set<String>> {
-        val graph = mutableMapOf<String, MutableSet<String>>()
+        val taskIds = tasks.map(TaskNode::id).toSet()
+        require(taskIds.size == tasks.size) { "The plan contains duplicate task IDs." }
+
+        val graph = linkedMapOf<String, Set<String>>()
         for (task in tasks) {
-            graph[task.id] = task.dependencies.toMutableSet()
+            val missing = task.dependencies.filterNot(taskIds::contains)
+            require(missing.isEmpty()) {
+                "Task '${task.title}' depends on unknown task IDs: ${missing.joinToString()}."
+            }
+            graph[task.id] = task.dependencies.toSet()
         }
         return graph
     }
@@ -492,7 +502,10 @@ class TaskPlanner(
             }
         }
         
-        return if (result.size == graph.size) result else graph.keys.toList()
+        require(result.size == graph.size) {
+            "The plan dependency graph contains a cycle. No tasks were executed."
+        }
+        return result
     }
 
     private fun dependenciesMet(task: TaskNode, taskMap: Map<String, TaskNode>): Boolean {
