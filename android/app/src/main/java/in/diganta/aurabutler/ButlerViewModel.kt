@@ -719,7 +719,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         HybridAiProvider.PROVIDER_GEMINI
                     )
                 ) {
-                    val answer = geminiAnalyzer.analyzeImage(
+                    val answer = geminiAnalyzer.analyzeScreen(
                         imageBytes = prepared.bytes,
                         mimeType = prepared.mimeType,
                         prompt = prompt,
