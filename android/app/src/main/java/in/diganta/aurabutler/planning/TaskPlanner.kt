@@ -320,7 +320,7 @@ class TaskPlanner(
         val query = task.toolArguments["query"] as? String ?: task.description
         val result = "Research completed for: $query. [Simulated result - would call $tool in production]"
         
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private suspend fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -331,7 +331,7 @@ class TaskPlanner(
             options = ReasoningEngine.ReasoningOptions(enableToolUse = false)
         )
         
-        SingleTaskResult(true, reasoningResult.finalAnswer, null)
+        return SingleTaskResult(true, reasoningResult.finalAnswer, null)
     }
 
     private fun executeAction(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -347,7 +347,7 @@ class TaskPlanner(
         }
 
         val result = "Action executed: ${task.description} using $tool. [Simulated - would execute in production]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private fun executeCreation(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -356,7 +356,7 @@ class TaskPlanner(
         val filePath = task.toolArguments["path"] as? String
         
         val result = "Created: ${filePath ?: "content"} (${content.length} chars). [Simulated]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private fun executeVerification(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -364,7 +364,7 @@ class TaskPlanner(
         val criteria = task.toolArguments["criteria"] as? String ?: "correctness and completeness"
         
         val result = "Verified: $target against criteria: $criteria. [Simulated verification passed]"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private fun executeCommunication(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -372,7 +372,7 @@ class TaskPlanner(
         val channel = task.toolArguments["channel"] as? String ?: "notification"
         
         val result = "Sent $channel: $message"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private fun executeDecision(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -382,7 +382,7 @@ class TaskPlanner(
         
         // In production, evaluate condition dynamically
         val result = "Decision point: $condition -> would branch to ${if (condition == "true") trueBranch else falseBranch}"
-        SingleTaskResult(true, result, null)
+        return SingleTaskResult(true, result, null)
     }
 
     private fun parseTasksFromReasoning(trace: List<ReasoningEngine.ReasoningStep>, finalAnswer: String): List<TaskNode> {
