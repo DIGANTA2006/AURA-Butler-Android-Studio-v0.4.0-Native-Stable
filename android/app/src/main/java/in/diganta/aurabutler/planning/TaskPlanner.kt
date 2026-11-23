@@ -316,11 +316,11 @@ class TaskPlanner(
             return SingleTaskResult(false, null, "Tool not found: $tool")
         }
 
-        // In production, actually call the tool
-        val query = task.toolArguments["query"] as? String ?: task.description
-        val result = "Research completed for: $query. [Simulated result - would call $tool in production]"
-        
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "The '$tool' tool is registered but has no live executor. No research was performed."
+        )
     }
 
     private suspend fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -346,43 +346,43 @@ class TaskPlanner(
             return SingleTaskResult(false, null, "Action requires user confirmation: ${task.description}")
         }
 
-        val result = "Action executed: ${task.description} using $tool. [Simulated - would execute in production]"
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No action executor is connected for '$tool'. No device or external action was performed."
+        )
     }
 
     private fun executeCreation(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val content = task.toolArguments["content"] as? String 
-            ?: "Generated content for: ${task.description}"
-        val filePath = task.toolArguments["path"] as? String
-        
-        val result = "Created: ${filePath ?: "content"} (${content.length} chars). [Simulated]"
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No file/content creation executor is connected. Nothing was written."
+        )
     }
 
     private fun executeVerification(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val target = task.toolArguments["target"] as? String ?: "previous task output"
-        val criteria = task.toolArguments["criteria"] as? String ?: "correctness and completeness"
-        
-        val result = "Verified: $target against criteria: $criteria. [Simulated verification passed]"
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No verification engine is connected. The task has not been verified."
+        )
     }
 
     private fun executeCommunication(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val message = task.toolArguments["message"] as? String ?: task.description
-        val channel = task.toolArguments["channel"] as? String ?: "notification"
-        
-        val result = "Sent $channel: $message"
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No communication-channel executor is connected. No message was sent."
+        )
     }
 
     private fun executeDecision(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val condition = task.toolArguments["condition"] as? String ?: "true"
-        val trueBranch = task.toolArguments["trueTask"] as? String
-        val falseBranch = task.toolArguments["falseTask"] as? String
-        
-        // In production, evaluate condition dynamically
-        val result = "Decision point: $condition -> would branch to ${if (condition == "true") trueBranch else falseBranch}"
-        return SingleTaskResult(true, result, null)
+        return SingleTaskResult(
+            success = false,
+            output = null,
+            error = "No condition evaluator is connected. No decision branch was executed."
+        )
     }
 
     private fun parseTasksFromReasoning(trace: List<ReasoningEngine.ReasoningStep>, finalAnswer: String): List<TaskNode> {
@@ -541,7 +541,8 @@ class TaskPlanner(
 }
 
 /**
- * Persistent plan storage with versioning and recovery.
+ * In-memory plan repository with bounded version history.
+ * Durable persistence and process-death recovery are not implemented yet.
  */
 class PlanStore {
     private val plans = ConcurrentHashMap<String, TaskPlanner.Plan>()
