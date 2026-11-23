@@ -1,7 +1,5 @@
 package `in`.diganta.aurabutler.memory
 
-import org.json.JSONArray
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,7 +22,7 @@ class SemanticMemoryFeatureVectorTest {
     }
 
     @Test
-    fun parserCreatesConceptOnlyFromExistingReferencedMemories() {
+    fun validatorCreatesConceptOnlyFromExistingReferencedMemories() {
         val store = MemoryStore()
         val memory = SemanticMemory(null, LocalEmbeddingProvider("unused"), store)
         val entries = listOf(
@@ -39,34 +37,24 @@ class SemanticMemoryFeatureVectorTest {
                 label = "Plan recovery"
             )
         )
-        val response = JSONObject()
-            .put(
-                "patterns",
-                JSONArray().put(
-                    JSONObject()
-                        .put("theme", "Reliable execution")
-                        .put("memoryIds", JSONArray().put("memory-coroutines").put("memory-plans"))
-                        .put("confidence", 0.92)
-                )
-            )
-            .put(
-                "concepts",
-                JSONArray().put(
-                    JSONObject()
-                        .put("name", "Execution safety")
-                        .put(
-                            "description",
-                            "Reliable task execution preserves explicit cancellation state."
-                        )
-                        .put(
-                            "relatedMemoryIds",
-                            JSONArray().put("memory-coroutines").put("memory-plans")
-                        )
-                )
-            )
-            .toString()
 
-        val result = memory.parsePatternResponse(response, entries)
+        val result = memory.validateAndStorePatterns(
+            proposedPatterns = listOf(
+                SemanticMemory.PatternCandidate(
+                    theme = "Reliable execution",
+                    memoryIds = setOf("memory-coroutines", "memory-plans"),
+                    confidence = 0.92
+                )
+            ),
+            proposedConcepts = listOf(
+                SemanticMemory.ConceptCandidate(
+                    name = "Execution safety",
+                    description = "Reliable task execution preserves explicit cancellation state.",
+                    relatedMemoryIds = setOf("memory-coroutines", "memory-plans")
+                )
+            ),
+            entries = entries
+        )
         val concept = store.getAll().singleOrNull {
             it.source == SemanticMemory.MemorySource.CONSOLIDATED &&
                 it.label == "Concept: Execution safety"
@@ -83,7 +71,7 @@ class SemanticMemoryFeatureVectorTest {
     }
 
     @Test
-    fun parserRejectsConceptsThatReferenceUnknownMemoryIds() {
+    fun validatorRejectsConceptsThatReferenceUnknownMemoryIds() {
         val store = MemoryStore()
         val memory = SemanticMemory(null, LocalEmbeddingProvider("unused"), store)
         val entries = listOf(
@@ -93,31 +81,24 @@ class SemanticMemoryFeatureVectorTest {
                 label = "Real memory"
             )
         )
-        val response = JSONObject()
-            .put(
-                "patterns",
-                JSONArray().put(
-                    JSONObject()
-                        .put("theme", "Unverified theme")
-                        .put("memoryIds", JSONArray().put("memory-one").put("invented-memory"))
-                        .put("confidence", 0.99)
-                )
-            )
-            .put(
-                "concepts",
-                JSONArray().put(
-                    JSONObject()
-                        .put("name", "Unverified concept")
-                        .put("description", "This concept references an invented memory identifier.")
-                        .put(
-                            "relatedMemoryIds",
-                            JSONArray().put("memory-one").put("invented-memory")
-                        )
-                )
-            )
-            .toString()
 
-        val result = memory.parsePatternResponse(response, entries)
+        val result = memory.validateAndStorePatterns(
+            proposedPatterns = listOf(
+                SemanticMemory.PatternCandidate(
+                    theme = "Unverified theme",
+                    memoryIds = setOf("memory-one", "invented-memory"),
+                    confidence = 0.99
+                )
+            ),
+            proposedConcepts = listOf(
+                SemanticMemory.ConceptCandidate(
+                    name = "Unverified concept",
+                    description = "This concept references an invented memory identifier.",
+                    relatedMemoryIds = setOf("memory-one", "invented-memory")
+                )
+            ),
+            entries = entries
+        )
 
         assertEquals(0, result.patternsFound)
         assertEquals(0, result.conceptsCreated)
