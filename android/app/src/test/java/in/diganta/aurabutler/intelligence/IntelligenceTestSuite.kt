@@ -459,7 +459,7 @@ class IntelligenceTestSuite {
         assertNotNull(reply.assistantMessage)
         assertTrue(
             "The local time command should return a clock-formatted answer: ${reply.assistantMessage}",
-            Regex("""(?i)\\bit is \\d{1,2}:\\d{2}\\s+[ap]m\\b""")
+            Regex("""(?i)\bit is \d{1,2}:\d{2}\s+[ap]m\b""")
                 .containsMatchIn(reply.assistantMessage)
         )
         assertTrue(reply.pendingActions.isEmpty())
