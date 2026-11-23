@@ -569,7 +569,8 @@ interface EmbeddingProvider {
 }
 
 /**
- * Local embedding provider using a small ONNX model (e.g., all-MiniLM-L6-v2 quantized).
+ * Temporary deterministic hash embedding used as a compile-safe fallback.
+ * This is not ONNX inference and does not provide semantic-quality embeddings.
  */
 class LocalEmbeddingProvider(
     private val modelPath: String
@@ -577,8 +578,9 @@ class LocalEmbeddingProvider(
     override val dimension: Int = 384  // all-MiniLM-L6-v2 dimension
     
     override fun embed(text: String): FloatArray {
-        // Placeholder - in production, run ONNX inference
-        // For now, return a deterministic hash-based pseudo-embedding
+        // The configured modelPath is not loaded by this implementation.
+        // Return a deterministic placeholder vector so callers can be tested,
+        // but do not treat it as semantic model inference.
         return generatePseudoEmbedding(text)
     }
     
@@ -616,7 +618,9 @@ class RemoteEmbeddingProvider(
 }
 
 /**
- * Persistent memory storage.
+ * In-memory semantic-memory index.
+ * Entries are lost when the process exits; encrypted persistent integration
+ * with PrivateMemoryStore remains a separate implementation task.
  */
 class MemoryStore {
     private val memories = ConcurrentHashMap<String, SemanticMemory.MemoryEntry>()
