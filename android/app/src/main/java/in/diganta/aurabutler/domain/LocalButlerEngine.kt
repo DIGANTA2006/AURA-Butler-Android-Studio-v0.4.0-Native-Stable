@@ -18,6 +18,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import java.util.UUID
 
 class LocalButlerEngine(
@@ -253,21 +254,26 @@ class LocalButlerEngine(
 
         if (isKnowledgeRequest(lower)) {
             val topic = knowledgeTopic(request)
-            return runCatching { liveInfo.knowledge(topic) }
-                .fold(
-                    onSuccess = { answer ->
-                        if (answer.isNullOrBlank()) {
-                            knowledgeSearch(topic)
-                        } else {
-                            Part(answer)
-                        }
-                    },
-                    onFailure = { knowledgeSearch(topic) }
-                )
+            val answer = try {
+                liveInfo.knowledge(topic)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            return if (answer.isNullOrBlank()) {
+                knowledgeSearch(topic)
+            } else {
+                Part(answer)
+            }
         }
 
-        val aiAttempt = runCatching {
-            generalAi?.answerStreaming(request, context, onPartial)
+        val aiAttempt = try {
+            Result.success(generalAi?.answerStreaming(request, context, onPartial))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
         }
 
         aiAttempt.getOrNull()
