@@ -250,6 +250,7 @@ class ProactiveEngine(
             name = "Daily Briefing",
             description = "Generates a morning summary of schedule, weather, and priorities",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
+            enabled = false, // Disabled until its required data source is integrated
             task = { _ ->
                 AgentResult(
                     success = false,
@@ -331,6 +332,7 @@ class ProactiveEngine(
             name = "Habit Learning",
             description = "Detects recurring patterns and suggests automations",
             schedule = AgentSchedule.WEEKLY,
+            enabled = false, // Disabled until its required data source is integrated
             task = { _ ->
                 AgentResult(
                     success = false,
@@ -345,6 +347,7 @@ class ProactiveEngine(
             name = "Research Follow-up",
             description = "Checks for updates on previous research topics",
             schedule = AgentSchedule.DAILY,
+            enabled = false, // Disabled until its required data source is integrated
             task = { _ ->
                 AgentResult(
                     success = false,
