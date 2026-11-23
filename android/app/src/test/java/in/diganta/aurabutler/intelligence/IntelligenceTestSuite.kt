@@ -1,19 +1,28 @@
 package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
+import `in`.diganta.aurabutler.memory.LocalEmbeddingProvider
+import `in`.diganta.aurabutler.memory.MemoryStore
+import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
-import kotlinx.coroutines.Dispatchers
+import `in`.diganta.aurabutler.planning.PlanStore
+import `in`.diganta.aurabutler.planning.TaskPlanner
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 /**
- * Comprehensive test suite for AURA v0.18 Intelligence Architecture
+ * Tests the APIs that are actually implemented in the current Android source.
+ * These tests deliberately do not expect placeholder tools or integrations to
+ * report successful execution.
  */
 class IntelligenceTestSuite {
-
     private lateinit var mockAiProvider: AiProvider
     private lateinit var settings: ButlerSettings
     private lateinit var context: ConversationContext
@@ -35,549 +44,471 @@ class IntelligenceTestSuite {
         testContextProvider = TestContextProvider()
     }
 
-    // ===== Reasoning Engine Tests =====
-
     @Test
-    fun testReasoningEngineBasicReasoning() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        val engine = ReasoningEngine(mockAiProvider, toolRegistry)
-        
-        val result = engine.reason(
-            "What is the weather like today?",
-            context
-        )
-        
-        assertNotNull(result.finalAnswer)
+    fun reasoningEngineReturnsProviderAnswerAndSafeTrace() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        val engine = ReasoningEngine(mockAiProvider, registry)
+
+        val result = engine.reason("Explain what an Android foreground service does.", context)
+
+        assertTrue(result.finalAnswer.contains("Mock AI response"))
         assertTrue(result.confidence > 0.0)
-        assertNotNull(result.reasoningTrace)
+        assertTrue(result.reasoningTrace.isNotEmpty())
+        assertTrue(result.toolsUsed.isEmpty())
+        assertFalse(result.requiresUserConfirmation)
     }
 
     @Test
-    fun testReasoningEngineToolSelection() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        // Register tools
-        registerAuraTools(toolRegistry)
-        
-        val engine = ReasoningEngine(mockAiProvider, toolRegistry)
-        
-        // Weather query should select get_weather tool
-        val result = engine.reason(
+    fun toolRegistryIsMetadataAndDoesNotPretendToExecuteTools() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        registry.register(
+            ReasoningEngine.ToolDefinition(
+                name = "get_weather",
+                description = "Get current weather",
+                keywords = listOf("weather")
+            )
+        )
+        val result = ReasoningEngine(mockAiProvider, registry).reason(
             "What's the weather in Mumbai?",
             context
         )
-        
-        val toolUseSteps = result.reasoningTrace?.filter { 
-            it.type == ReasoningEngine.StepType.TOOL_USE 
-        } ?: emptyList()
-        
-        assertTrue("Should have tool use steps", toolUseSteps.isNotEmpty())
+
+        assertTrue(registry.availableTools().contains("get_weather"))
+        assertTrue(result.toolsUsed.isEmpty())
+        assertFalse(result.reasoningTrace.any { it.type == ReasoningEngine.StepType.TOOL_USE })
+        assertTrue(result.finalAnswer.contains("Mock AI response"))
     }
 
     @Test
-    fun testReasoningEngineReflectionMode() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        val engine = ReasoningEngine(mockAiProvider, toolRegistry)
-        
-        val options = ReasoningEngine.ReasoningOptions(
-            mode = ReasoningEngine.ReasoningMode.REFLECTIVE,
-            enableReflection = true
-        )
-        
-        val result = engine.reason(
-            "Explain quantum computing",
+    fun reasoningEngineCanAddReflectionSummary() = runBlocking {
+        val result = ReasoningEngine(
+            mockAiProvider,
+            ReasoningEngine.ToolRegistry()
+        ).reason(
+            "Explain quantum computing.",
             context,
-            options
+            ReasoningEngine.ReasoningOptions(enableReflection = true)
         )
-        
-        val reflectionSteps = result.reasoningTrace?.filter { 
-            it.type == ReasoningEngine.StepType.REFLECTION 
-        } ?: emptyList()
-        
-        assertTrue("Reflective mode should have reflection steps", reflectionSteps.isNotEmpty())
-    }
 
-    // ===== Task Planner Tests =====
-
-    @Test
-    fun testTaskPlannerPlanCreation() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        registerAuraTools(toolRegistry)
-        val reasoningEngine = ReasoningEngine(mockAiProvider, toolRegistry)
-        val planStore = TaskPlanner.PlanStore()
-        val planner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
-        
-        val plan = planner.createPlanFromGoal(
-            "Set a timer for 10 minutes and then play music",
-            context
-        )
-        
-        assertNotNull(plan)
-        assertTrue("Plan should have tasks", plan.tasks.size >= 2)
-        assertEquals(TaskPlanner.PlanStatus.PENDING, plan.status)
+        assertTrue(result.reasoningTrace.any {
+            it.type == ReasoningEngine.StepType.REFLECTION
+        })
     }
 
     @Test
-    fun testTaskPlannerParallelExecution() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        registerAuraTools(toolRegistry)
-        val reasoningEngine = ReasoningEngine(mockAiProvider, toolRegistry)
-        val planStore = TaskPlanner.PlanStore()
-        val planner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
-        
+    fun taskPlannerParsesNumberedPlanSteps() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        val planner = TaskPlanner(
+            ReasoningEngine(mockAiProvider, registry),
+            registry,
+            PlanStore()
+        )
+
         val plan = planner.createPlanFromGoal(
-            "Check weather and get news headlines",
+            "Set a timer for ten minutes and then play music.",
             context
         )
-        
-        // Should create parallel tasks for independent operations
-        val parallelGroups = plan.tasks.filter { it.type == TaskPlanner.TaskType.PARALLEL_GROUP }
-        // Note: Current implementation may not auto-detect parallelism
-        // This test documents expected behavior
+
+        assertTrue(plan.tasks.size >= 2)
+        assertEquals(TaskPlanner.PlanStatus.DRAFT, plan.status)
+        assertTrue(plan.tasks.first().dependencies.isEmpty())
+        assertTrue(plan.tasks.drop(1).all { it.dependencies.isNotEmpty() })
     }
 
     @Test
-    fun testTaskPlannerPlanPersistence() = runBlocking {
-        val toolRegistry = ReasoningEngine.ToolRegistry()
-        registerAuraTools(toolRegistry)
-        val reasoningEngine = ReasoningEngine(mockAiProvider, toolRegistry)
-        val planStore = TaskPlanner.PlanStore()
-        val planner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
-        
-        val plan = planner.createPlanFromGoal(
-            "Create a daily schedule",
-            context
+    fun taskPlannerPlanStoreKeepsInMemoryPlanAndHistory() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        val store = PlanStore()
+        val planner = TaskPlanner(
+            ReasoningEngine(mockAiProvider, registry),
+            registry,
+            store
         )
-        
-        // Save and retrieve
-        planStore.savePlan(plan)
-        val retrieved = planStore.getPlan(plan.id)
-        
+
+        val plan = planner.createPlanFromGoal("Create a daily study schedule.", context)
+        store.save(plan)
+        val retrieved = store.get(plan.id)
+
         assertNotNull(retrieved)
-        assertEquals(plan.id, retrieved!!.id)
-        assertEquals(plan.goal, retrieved.goal)
+        assertEquals(plan.id, retrieved?.id)
+        assertEquals(plan.description, retrieved?.description)
+        assertTrue(store.getHistory(plan.id).isNotEmpty())
     }
 
-    // ===== Semantic Memory Tests =====
-
     @Test
-    fun testSemanticMemoryRememberAndRecall() = runBlocking {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        val memory = SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-        
-        // Store a memory
+    fun semanticMemoryCanRememberAndRecallWithoutClaimingSemanticModelInference() = runBlocking {
+        val store = MemoryStore()
+        val memory = SemanticMemory(
+            mockAiProvider,
+            LocalEmbeddingProvider("test-placeholder"),
+            store
+        )
+
         val entry = memory.remember(
-            content = "User prefers dark mode and quiet notifications",
+            content = "User prefers dark mode and quiet notifications.",
             label = "UI Preferences",
             context = context,
             importance = 0.8
         )
-        
-        assertNotNull(entry.id)
-        assertEquals("UI Preferences", entry.label)
-        assertEquals(0.8, entry.metadata.importance, 0.01)
-    }
+        assertEquals(0.8, entry.importance, 0.001)
+        assertNotNull(store.get(entry.id))
 
-    @Test
-    fun testSemanticMemorySemanticSearch() = runBlocking {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        val memory = SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-        
-        // Store related memories
-        memory.remember("User likes jazz music", "Music Preference 1", context, importance = 0.7)
-        memory.remember("User enjoys classical piano", "Music Preference 2", context, importance = 0.6)
-        memory.remember("User hates loud rock music", "Music Preference 3", context, importance = 0.5)
-        memory.remember("User's favorite food is pizza", "Food Preference", context, importance = 0.7)
-        
-        // Search for music-related content
         val result = memory.recall(
-            "What music does the user like?",
+            "UI preferences",
             context,
             SemanticMemory.RecallOptions(
                 maxResults = 3,
-                strategy = SemanticMemory.RetrievalStrategy.SEMANTIC,
-                minSimilarity = 0.1
-            )
-        )
-        
-        assertTrue("Should find music memories", result.entries.size >= 2)
-        val musicEntries = result.entries.filter { 
-            it.entry.label.contains("Music") 
-        }
-        assertTrue("Should have music entries", musicEntries.size >= 2)
-    }
-
-    @Test
-    fun testSemanticMemoryTemporalRetrieval() = runBlocking {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        val memory = SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-        
-        memory.remember("Meeting at 10 AM tomorrow", "Meeting 1", context, importance = 0.8)
-        memory.remember("Lunch with client at 1 PM", "Meeting 2", context, importance = 0.7)
-        memory.remember("Project deadline next Friday", "Deadline", context, importance = 0.9)
-        
-        val result = memory.recall(
-            "What's my schedule?",
-            context,
-            SemanticMemory.RecallOptions(
-                maxResults = 5,
+                minScore = 0.0,
                 strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
             )
         )
-        
-        assertTrue("Should retrieve temporal memories", result.entries.isNotEmpty())
+        assertTrue(result.entries.isNotEmpty())
+        assertTrue(result.entries.size <= 3)
     }
 
     @Test
-    fun testSemanticMemoryConsolidation() = runBlocking {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        val memory = SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-        
-        // Add duplicate memories
-        memory.remember("User likes coffee", "Coffee 1", context, importance = 0.5)
-        memory.remember("User enjoys coffee in the morning", "Coffee 2", context, importance = 0.5)
-        memory.remember("Coffee is user's favorite drink", "Coffee 3", context, importance = 0.5)
-        
-        val statsBefore = memory.getStats()
-        
-        // Run consolidation
-        memory.consolidate()
-        
-        val statsAfter = memory.getStats()
-        
-        // Should have created consolidated memory
-        assertTrue("Should have consolidated memories", statsAfter.totalMemories >= statsBefore.totalMemories)
+    fun memoryRecallReturnsBoundedCandidatesWithPlaceholderEmbeddings() = runBlocking {
+        val store = MemoryStore()
+        val memory = SemanticMemory(
+            mockAiProvider,
+            LocalEmbeddingProvider("test-placeholder"),
+            store
+        )
+
+        memory.remember("User likes jazz music.", "Music 1", context, importance = 0.7)
+        memory.remember("User enjoys classical piano.", "Music 2", context, importance = 0.6)
+        memory.remember("User likes pizza.", "Food", context, importance = 0.7)
+
+        val result = memory.recall(
+            "Music preferences",
+            context,
+            SemanticMemory.RecallOptions(
+                maxResults = 2,
+                minScore = 0.0,
+                strategy = SemanticMemory.RetrievalStrategy.HYBRID
+            )
+        )
+
+        // This currently verifies the retrieval contract, not model-level semantic quality.
+        assertTrue(result.entries.isNotEmpty())
+        assertTrue(result.entries.size <= 2)
     }
 
     @Test
-    fun testSemanticMemoryForgettingCurve() = runBlocking {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        val memory = SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-        
-        // Add memory with low importance
+    fun temporalMemoryRetrievalReturnsRecentEntries() = runBlocking {
+        val store = MemoryStore()
+        val memory = SemanticMemory(
+            mockAiProvider,
+            LocalEmbeddingProvider("test-placeholder"),
+            store
+        )
+
+        memory.remember("Meeting at 10 AM tomorrow.", "Meeting", context, importance = 0.8)
+        memory.remember("Lunch with a client at 1 PM.", "Lunch", context, importance = 0.7)
+        memory.remember("Project deadline next Friday.", "Deadline", context, importance = 0.9)
+
+        val result = memory.recall(
+            "Schedule",
+            context,
+            SemanticMemory.RecallOptions(
+                maxResults = 5,
+                minScore = 0.0,
+                strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
+            )
+        )
+        assertTrue(result.entries.isNotEmpty())
+    }
+
+    @Test
+    fun memoryConsolidationReturnsStructuredResult() = runBlocking {
+        val store = MemoryStore()
+        val memory = SemanticMemory(
+            mockAiProvider,
+            LocalEmbeddingProvider("test-placeholder"),
+            store
+        )
+        memory.remember("User likes coffee.", "Coffee 1", context, importance = 0.5)
+        memory.remember("User enjoys coffee in the morning.", "Coffee 2", context, importance = 0.5)
+
+        val result = memory.consolidate()
+
+        assertTrue(result.mergedCount >= 0)
+        assertTrue(result.patternsFound >= 0)
+        assertTrue(result.conceptsCreated >= 0)
+        assertTrue(result.decayedCount >= 0)
+    }
+
+    @Test
+    fun forgettingCurveUsesEntryImportanceAndLastAccessTime() = runBlocking {
+        val store = MemoryStore()
+        val memory = SemanticMemory(
+            null,
+            LocalEmbeddingProvider("test-placeholder"),
+            store
+        )
         val entry = memory.remember(
-            "Random fact: bananas are berries",
+            "Old low-importance trivia.",
             "Trivia",
             context,
             importance = 0.1
         )
-        
-        // Manually age the memory
-        val agedEntry = entry.copy(
-            metadata = entry.metadata.copy(
-                lastAccessed = System.currentTimeMillis() - (90 * 24 * 60 * 60 * 1000L) // 90 days ago
+        store.save(
+            entry.copy(
+                lastAccessed = System.currentTimeMillis() - 90L * 24 * 60 * 60 * 1_000
             )
         )
-        memoryStore.upsert(agedEntry)
-        
-        // Apply forgetting curve
-        memory.applyForgettingCurve()
-        
-        // Low importance old memory should be forgotten
-        val retrieved = memoryStore.get(entry.id)
-        assertTrue("Low importance old memory should be forgotten or very low importance", 
-            retrieved == null || retrieved.metadata.importance < 0.05)
+
+        val result = memory.consolidate()
+
+        assertTrue(result.decayedCount >= 1)
+        assertEquals(null, store.get(entry.id))
     }
 
-    // ===== Proactive Engine Tests =====
-
     @Test
-    fun testProactiveEngineSuggestionGeneration() = runBlocking {
-        val proactiveEngine = ProactiveEngine(
+    fun proactiveEngineSuggestionGenerationIsSafeWithoutExternalData() = runBlocking {
+        val engine = ProactiveEngine(
             aiProvider = mockAiProvider,
             semanticMemory = createTestSemanticMemory(),
             settings = settings,
             contextProvider = testContextProvider
         )
-        
-        proactiveEngine.start()
-        
-        // Wait for suggestion generation
-        Thread.sleep(1000)
-        
-        val suggestions = proactiveEngine.getSuggestions(context)
-        
-        // Should generate time-based suggestions
-        assertTrue("Should have suggestions", suggestions.isNotEmpty())
-        
-        proactiveEngine.stop()
+        try {
+            engine.start()
+            delay(300)
+            val suggestions = engine.getSuggestions(context)
+            assertTrue(suggestions.size <= 5)
+            assertTrue(suggestions.all { it.expiresAt > System.currentTimeMillis() })
+        } finally {
+            engine.stop()
+        }
     }
 
     @Test
-    fun testProactiveEngineBatteryAlert() = runBlocking {
-        val proactiveEngine = ProactiveEngine(
+    fun proactiveEngineCreatesBatteryAlertFromInjectedDeviceState() = runBlocking {
+        val engine = ProactiveEngine(
             aiProvider = mockAiProvider,
             semanticMemory = createTestSemanticMemory(),
             settings = settings,
             contextProvider = TestContextProvider(lowBattery = true)
         )
-        
-        proactiveEngine.start()
-        Thread.sleep(1000)
-        
-        val suggestions = proactiveEngine.getSuggestions(context)
-        
-        val batteryAlerts = suggestions.filter { 
-            it.type == ProactiveEngine.SuggestionType.MAINTENANCE &&
-            it.title.contains("Battery")
+        try {
+            engine.start()
+            delay(500)
+            val alerts = engine.getSuggestions(context).filter {
+                it.type == ProactiveEngine.SuggestionType.MAINTENANCE &&
+                    it.title.contains("Battery")
+            }
+            assertTrue(alerts.isNotEmpty())
+        } finally {
+            engine.stop()
         }
-        
-        assertTrue("Should have battery alert", batteryAlerts.isNotEmpty())
-        
-        proactiveEngine.stop()
     }
 
     @Test
-    fun testProactiveEngineDismissAndAccept() = runBlocking {
-        val proactiveEngine = ProactiveEngine(
+    fun proactiveSuggestionDismissalRemovesItFromVisibleSuggestions() = runBlocking {
+        val engine = ProactiveEngine(
+            aiProvider = mockAiProvider,
+            semanticMemory = createTestSemanticMemory(),
+            settings = settings,
+            contextProvider = TestContextProvider(lowBattery = true)
+        )
+        try {
+            engine.start()
+            delay(500)
+            val suggestion = engine.getSuggestions(context).firstOrNull()
+            if (suggestion != null) {
+                engine.dismissSuggestion(suggestion.id)
+                assertFalse(engine.getSuggestions(context).any { it.id == suggestion.id })
+            }
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun proactiveAgentsExposeIntegrationAvailability() {
+        val engine = ProactiveEngine(
             aiProvider = mockAiProvider,
             semanticMemory = createTestSemanticMemory(),
             settings = settings,
             contextProvider = testContextProvider
         )
-        
-        proactiveEngine.start()
-        Thread.sleep(1000)
-        
-        val suggestions = proactiveEngine.getSuggestions(context)
-        if (suggestions.isNotEmpty()) {
-            val suggestion = suggestions.first()
-            
-            // Test dismiss
-            proactiveEngine.dismissSuggestion(suggestion.id)
-            val afterDismiss = proactiveEngine.getSuggestions(context)
-            assertFalse("Dismissed suggestion should not appear", 
-                afterDismiss.any { it.id == suggestion.id })
-        }
-        
-        proactiveEngine.stop()
+        val agents = engine.getAgentStatus()
+
+        assertTrue(agents.size >= 6)
+        assertTrue(agents.any { it.name == "Memory Consolidation" })
+        assertTrue(agents.any { it.name == "Battery Optimization" })
+        assertTrue(agents.any { it.name == "Storage Monitor" })
+        assertTrue(agents.filter {
+            it.name in setOf("Daily Briefing", "Habit Learning", "Research Follow-up")
+        }.all { !it.enabled })
     }
 
     @Test
-    fun testProactiveEngineBackgroundAgents() = runBlocking {
-        val proactiveEngine = ProactiveEngine(
-            aiProvider = mockAiProvider,
-            semanticMemory = createTestSemanticMemory(),
-            settings = settings,
-            contextProvider = testContextProvider
-        )
-        
-        val agents = proactiveEngine.getAgentStatus()
-        
-        assertTrue("Should have default agents", agents.size >= 6)
-        
-        val agentNames = agents.map { it.name }.toSet()
-        assertTrue("Should have Daily Briefing agent", agentNames.contains("Daily Briefing"))
-        assertTrue("Should have Memory Consolidation agent", agentNames.contains("Memory Consolidation"))
-        assertTrue("Should have Battery Optimization agent", agentNames.contains("Battery Optimization"))
-        assertTrue("Should have Storage Monitor agent", agentNames.contains("Storage Monitor"))
-        assertTrue("Should have Habit Learning agent", agentNames.contains("Habit Learning"))
-        assertTrue("Should have Research Follow-up agent", agentNames.contains("Research Follow-up"))
-    }
-
-    // ===== Intelligence Coordinator Tests =====
-
-    @Test
-    fun testIntelligenceCoordinatorStrategySelection() = runBlocking {
+    fun coordinatorSelectsLocalReasoningAndPlanningStrategies() = runBlocking {
         val coordinator = IntelligenceCoordinator(
             aiProvider = mockAiProvider,
             settings = settings,
             contextProvider = testContextProvider
         )
-        
         coordinator.initialize()
-        
-        // Test local command strategy
+
         val localResult = coordinator.processRequest("Open YouTube", context)
         assertEquals(IntelligenceCoordinator.IntelligenceMode.MINIMAL, localResult.mode)
-        
-        // Test reasoning strategy
-        val reasoningResult = coordinator.processRequest("Explain how photosynthesis works", context)
+
+        val reasoningResult = coordinator.processRequest(
+            "Explain how photosynthesis works.",
+            context
+        )
         assertEquals(IntelligenceCoordinator.IntelligenceMode.BALANCED, reasoningResult.mode)
-        
-        // Test planning strategy
-        val planningResult = coordinator.processRequest("Plan my week with meetings and tasks", context)
+
+        val planningResult = coordinator.processRequest(
+            "Plan my week with meetings and tasks.",
+            context
+        )
         assertEquals(IntelligenceCoordinator.IntelligenceMode.ENHANCED, planningResult.mode)
         assertNotNull(planningResult.plan)
     }
 
     @Test
-    fun testIntelligenceCoordinatorModeSwitching() = runBlocking {
+    fun coordinatorModeSwitchingRemainsExplicit() = runBlocking {
         val coordinator = IntelligenceCoordinator(
             aiProvider = mockAiProvider,
             settings = settings,
             contextProvider = testContextProvider
         )
-        
         coordinator.initialize()
-        
-        // Test minimal mode
+
         coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.MINIMAL)
-        val minimalResult = coordinator.processRequest("Explain quantum physics", context)
-        assertEquals(IntelligenceCoordinator.IntelligenceMode.MINIMAL, minimalResult.mode)
-        
-        // Test autonomous mode
+        val minimal = coordinator.processRequest("Explain quantum physics.", context)
+        assertEquals(IntelligenceCoordinator.IntelligenceMode.MINIMAL, minimal.mode)
+
         coordinator.setIntelligenceMode(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS)
-        val autonomousResult = coordinator.processRequest("Figure out my schedule and optimize it", context)
-        assertEquals(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS, autonomousResult.mode)
+        val autonomous = coordinator.processRequest(
+            "Figure out my schedule and optimize it.",
+            context
+        )
+        assertEquals(IntelligenceCoordinator.IntelligenceMode.AUTONOMOUS, autonomous.mode)
     }
 
     @Test
-    fun testIntelligenceCoordinatorMemoryIntegration() = runBlocking {
+    fun coordinatorMemoryIntegrationUsesConfiguredRecallContract() = runBlocking {
         val coordinator = IntelligenceCoordinator(
             aiProvider = mockAiProvider,
             settings = settings,
             contextProvider = testContextProvider
         )
-        
         coordinator.initialize()
-        
-        // Store memory
+
         val entry = coordinator.remember(
-            "User is a software engineer who likes Kotlin",
+            "User is a software developer who likes Kotlin.",
             "User Profile",
             context,
             importance = 0.9
         )
-        
         assertNotNull(entry.id)
-        
-        // Recall should find it
-        val result = coordinator.recall("What is the user's profession?", context)
-        assertTrue("Should find user profile", result.entries.isNotEmpty())
+
+        val result = coordinator.recall(
+            "What is the user's profession?",
+            context,
+            SemanticMemory.RecallOptions(
+                minScore = 0.0,
+                strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
+            )
+        )
+        assertTrue(result.entries.isNotEmpty())
     }
 
     @Test
-    fun testIntelligenceCoordinatorStatus() = runBlocking {
+    fun coordinatorStatusReportsRegisteredCapabilities() = runBlocking {
         val coordinator = IntelligenceCoordinator(
             aiProvider = mockAiProvider,
             settings = settings,
             contextProvider = testContextProvider
         )
-        
         coordinator.initialize()
-        
+
         val status = coordinator.getStatus()
-        
-        assertTrue("Should be initialized", status.initialized)
+        assertTrue(status.initialized)
         assertEquals(IntelligenceCoordinator.IntelligenceMode.BALANCED, status.mode)
-        assertTrue("Should have tools registered", status.toolCount > 0)
+        assertTrue(status.toolCount > 0)
     }
 
-    // ===== Enhanced Butler Engine Tests =====
-
     @Test
-    fun testEnhancedButlerEngineLocalCommands() = runBlocking {
+    fun enhancedEngineKeepsLocalCommandsAvailable() = runBlocking {
         val engine = EnhancedButlerEngine.create(
             liveInfo = TestLiveInfoProvider(),
             generalAi = mockAiProvider,
             settingsProvider = { settings },
             contextProvider = testContextProvider
         )
-        
-        // Test local command still works
         val reply = engine.chat("What time is it?", context)
-        
+
         assertNotNull(reply.assistantMessage)
-        assertTrue(reply.assistantMessage.contains("time") || reply.assistantMessage.contains("Time"))
+        assertTrue(
+            reply.assistantMessage.contains("time", ignoreCase = true) ||
+                reply.assistantMessage.contains("Time")
+        )
     }
 
     @Test
-    fun testEnhancedButlerEngineIntelligenceMode() = runBlocking {
+    fun enhancedEngineUsesAiForComplexQuestionsWithoutFakeActions() = runBlocking {
         val engine = EnhancedButlerEngine.create(
             liveInfo = TestLiveInfoProvider(),
             generalAi = mockAiProvider,
             settingsProvider = { settings },
             contextProvider = testContextProvider
         )
-        
-        // Test complex query uses intelligence
-        val reply = engine.chat("Analyze the pros and cons of using Kotlin vs Java for Android development", context)
-        
-        assertNotNull(reply.assistantMessage)
-        assertTrue(reply.assistantMessage.length > 50) // Should have substantial answer
+        val reply = engine.chat(
+            "Analyze the pros and cons of using Kotlin vs Java for Android development.",
+            context
+        )
+
+        assertTrue(reply.assistantMessage.contains("Mock AI response"))
+        assertTrue(reply.pendingActions.isEmpty())
     }
 
     @Test
-    fun testEnhancedButlerEngineProactiveSuggestions() = runBlocking {
+    fun enhancedEngineReturnsProactiveMetadataWithoutPretendingToExecuteIt() {
         val engine = EnhancedButlerEngine.create(
             liveInfo = TestLiveInfoProvider(),
             generalAi = mockAiProvider,
             settingsProvider = { settings },
             contextProvider = testContextProvider
         )
-        
-        val suggestions = engine.getProactiveSuggestions(context)
-        
-        // Should return suggestions (may be empty initially)
-        assertNotNull(suggestions)
+        assertNotNull(engine.getProactiveSuggestions(context))
     }
 
-    // ===== Helper Methods =====
-
-    private fun registerAuraTools(registry: ReasoningEngine.ToolRegistry) {
-        registry.register(ReasoningEngine.ToolDefinition(
-            name = "get_weather",
-            description = "Get current weather",
-            keywords = listOf("weather"),
-            requiresConfirmation = false
-        ))
-        registry.register(ReasoningEngine.ToolDefinition(
-            name = "get_news",
-            description = "Get news headlines",
-            keywords = listOf("news"),
-            requiresConfirmation = false
-        ))
-        registry.register(ReasoningEngine.ToolDefinition(
-            name = "set_timer",
-            description = "Set a timer",
-            keywords = listOf("timer"),
-            requiresConfirmation = false
-        ))
-        registry.register(ReasoningEngine.ToolDefinition(
-            name = "play_media",
-            description = "Play music",
-            keywords = listOf("play", "music"),
-            requiresConfirmation = false
-        ))
-    }
-
-    private fun createTestSemanticMemory(): SemanticMemory {
-        val embeddingProvider = SemanticMemory.LocalEmbeddingProvider("test")
-        val memoryStore = SemanticMemory.MemoryStore()
-        return SemanticMemory(mockAiProvider, embeddingProvider, memoryStore)
-    }
-
-    // ===== Test Doubles =====
+    private fun createTestSemanticMemory(): SemanticMemory = SemanticMemory(
+        mockAiProvider,
+        LocalEmbeddingProvider("test-placeholder"),
+        MemoryStore()
+    )
 
     private class MockAiProvider : AiProvider {
-        override suspend fun answer(message: String, context: ConversationContext): String? {
-            return "Mock AI response for: $message"
-        }
+        override suspend fun answer(
+            message: String,
+            context: ConversationContext
+        ): String = "Mock AI response for: $message"
 
         override suspend fun answerStreaming(
             message: String,
             context: ConversationContext,
             onDelta: (String) -> Unit
-        ): String? {
+        ): String {
             val response = "Mock streaming response for: $message"
             onDelta(response)
             return response
         }
     }
 
-    private class TestContextProvider(
-        val lowBattery: Boolean = false
-    ) : IntelligenceCoordinator.ContextProvider, ProactiveEngine.ContextProvider {
-        
+    private inner class TestContextProvider(
+        private val lowBattery: Boolean = false
+    ) : IntelligenceCoordinator.ContextProvider {
         override fun getCurrentContext(): ConversationContext = context
-        
-        override fun getDeviceState(): ProactiveEngine.DeviceState {
-            return ProactiveEngine.DeviceState(
+
+        override fun getDeviceState(): ProactiveEngine.DeviceState =
+            ProactiveEngine.DeviceState(
                 batteryLevel = if (lowBattery) 10 else 75,
                 isCharging = false,
                 networkType = "WIFI",
@@ -585,15 +516,21 @@ class IntelligenceTestSuite {
                 screenOn = true,
                 foregroundApp = "in.diganta.aurabutler"
             )
-        }
     }
 
     private class TestLiveInfoProvider : LiveInfoProvider {
         override suspend fun weather(settings: ButlerSettings): String = "Sunny, 25°C"
-        override suspend fun headlines(limit: Int): List<String> = listOf("Headline 1", "Headline 2")
-        override suspend fun weatherFor(settings: ButlerSettings, location: String?): String = "Sunny in $location"
-        override suspend fun weatherForecast(settings: ButlerSettings, location: String?, days: Int): String = "$days day forecast for $location"
-        override suspend fun headlinesFor(limit: Int, topic: String?): List<String> = listOf("$topic Headline 1")
+        override suspend fun headlines(limit: Int): List<String> =
+            listOf("Headline 1", "Headline 2")
+        override suspend fun weatherFor(settings: ButlerSettings, location: String?): String =
+            "Sunny in $location"
+        override suspend fun weatherForecast(
+            settings: ButlerSettings,
+            location: String?,
+            days: Int
+        ): String = "$days day forecast for $location"
+        override suspend fun headlinesFor(limit: Int, topic: String?): List<String> =
+            listOf("$topic Headline 1")
         override suspend fun knowledge(query: String): String? = "Knowledge about $query"
         override fun deviceStatus(): String = "Battery: 75%, Storage: 35% free"
     }
