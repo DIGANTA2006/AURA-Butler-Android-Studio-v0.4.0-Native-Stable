@@ -222,7 +222,7 @@ class EnhancedButlerEngine(
         return ButlerReply(
             assistantMessage = responseText,
             speechText = responseText.replace(
-                Regex("""https?://\\S+"""),
+                Regex("""https?://\S+"""),
                 "the prepared link"
             ),
             pendingActions = emptyList(),
