@@ -158,14 +158,14 @@ object VoiceCommandClassifier {
             tokens[1] in setOf("aura", "ora", "aurah")
         ) {
             repeat(2) { tokens.removeAt(0) }
-        } else if (tokens.firstOrNull() in setOf("aura", "ora", "aurah")) {
+        } else if (tokens.firstOrNull()?.let { it in setOf("aura", "ora", "aurah") } == true) {
             tokens.removeAt(0)
         }
 
-        while (tokens.firstOrNull() in setOf("please", "kindly")) {
+        while (tokens.firstOrNull()?.let { it in setOf("please", "kindly") } == true) {
             tokens.removeAt(0)
         }
-        while (tokens.lastOrNull() in setOf("please", "now")) {
+        while (tokens.lastOrNull()?.let { it in setOf("please", "now") } == true) {
             tokens.removeAt(tokens.lastIndex)
         }
 
