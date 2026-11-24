@@ -16,7 +16,6 @@ import `in`.diganta.aurabutler.memory.MemoryStore
 import `in`.diganta.aurabutler.memory.OnnxSentenceEmbeddingProvider
 import `in`.diganta.aurabutler.memory.SemanticMemory
 import android.util.Log
-import java.io.File
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.runtime.ActionAuditLog
 import `in`.diganta.aurabutler.runtime.AuraRuntimeState
@@ -66,23 +65,24 @@ class ProductionButlerEngine(
 
     private val semanticMemoryLock = Any()
 
-    private fun semanticMemoryOrNull(): SemanticMemory? {
-        semanticMemoryInstance?.let { return it }
-        if (!EmbeddingModelFiles.isInstalled(appContext)) return null
-        synchronized(semanticMemoryLock) {
-            semanticMemoryInstance?.let { return it }
-            val model = EmbeddingModelFiles.modelFile(appContext)
-            val vocabulary = EmbeddingModelFiles.vocabularyFile(appContext)
-            val provider = OnnxSentenceEmbeddingProvider(model, vocabulary)
-            return SemanticMemory(
-                aiProvider = null,
-                embeddingProvider = provider,
-                memoryStore = MemoryStore(
-                    persistence = EncryptedSemanticMemoryPersistence(appContext)
-                )
-            ).also { semanticMemoryInstance = it }
+    private suspend fun semanticMemoryOrNull(): SemanticMemory? =
+        withContext(Dispatchers.IO) {
+            semanticMemoryInstance?.let { return@withContext it }
+            if (!EmbeddingModelFiles.isInstalled(appContext)) return@withContext null
+            synchronized(semanticMemoryLock) {
+                semanticMemoryInstance?.let { return@synchronized it }
+                val model = EmbeddingModelFiles.modelFile(appContext)
+                val vocabulary = EmbeddingModelFiles.vocabularyFile(appContext)
+                val provider = OnnxSentenceEmbeddingProvider(model, vocabulary)
+                SemanticMemory(
+                    aiProvider = null,
+                    embeddingProvider = provider,
+                    memoryStore = MemoryStore(
+                        persistence = EncryptedSemanticMemoryPersistence(appContext)
+                    )
+                ).also { semanticMemoryInstance = it }
+            }
         }
-    }
 
     private suspend fun enrichWithSemanticMemory(
         message: String,
@@ -135,6 +135,7 @@ class ProductionButlerEngine(
         writes: List<MemoryItem>,
         context: ConversationContext
     ) {
+        if (writes.isEmpty()) return
         val semantic = try {
             semanticMemoryOrNull()
         } catch (error: Exception) {
@@ -726,6 +727,7 @@ class ProductionButlerEngine(
         values.any { contains(it, ignoreCase = true) }
 
     private companion object {
+        const val TAG = "ProductionButlerEngine"
         const val TURN_TIMEOUT_MS = 38_000L
         const val DETERMINISTIC_TURN_TIMEOUT_MS = 20_000L
         const val DETAILED_NEWS_TIMEOUT_MS = 45_000L
