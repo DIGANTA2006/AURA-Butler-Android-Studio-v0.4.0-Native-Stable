@@ -13,6 +13,7 @@ import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.Sender
 import `in`.diganta.aurabutler.planning.AndroidPlanningRuntime
+import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -89,6 +90,22 @@ class ProactiveAgentWorker(
             )
 
             engine.runDueAgentsNow()
+
+            // Expired proposals are never replayed. Persist their plan checkpoint
+            // as skipped so the user can explicitly resume the remaining safe work.
+            engine.expirePendingApprovals().forEach { action ->
+                val planId = action.payload[ProductionTaskExecutor.PLAN_ID_ARGUMENT]
+                val taskId = action.payload[ProductionTaskExecutor.TASK_ID_ARGUMENT]
+                if (!planId.isNullOrBlank() && !taskId.isNullOrBlank()) {
+                    planningRuntime.planner.resolveApproval(
+                        planId = planId,
+                        taskId = taskId,
+                        actionId = action.id,
+                        approved = false,
+                        executionDetail = "Approval expired while AURA was closed. The action was not executed."
+                    )
+                }
+            }
             engine.refreshNow(force = true)
             Result.success()
         } catch (cancelled: CancellationException) {
