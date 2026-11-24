@@ -711,7 +711,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                             prompt = prompt,
                             settings = settings
                         )
-                        return@runCatching answer to "gemma-private-vision"
+                        return@runCatchingCancellable answer to "gemma-private-vision"
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
