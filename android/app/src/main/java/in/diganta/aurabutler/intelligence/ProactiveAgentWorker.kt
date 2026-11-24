@@ -11,6 +11,7 @@ import `in`.diganta.aurabutler.memory.MemoryStore
 import `in`.diganta.aurabutler.memory.OnnxSentenceEmbeddingProvider
 import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
+import `in`.diganta.aurabutler.model.Sender
 import `in`.diganta.aurabutler.planning.AndroidPlanningRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -47,8 +48,11 @@ class ProactiveAgentWorker(
 
         try {
             val memories = secureStore.loadMemories()
+            val userMessages = secureStore.loadMessages()
+                .filter { it.sender == Sender.USER }
+                .takeLast(80)
             val context = ConversationContext(
-                recentMessages = emptyList(),
+                recentMessages = userMessages,
                 memories = memories,
                 settings = settings
             )
