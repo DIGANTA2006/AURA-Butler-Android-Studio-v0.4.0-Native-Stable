@@ -502,35 +502,58 @@ class TaskPlanner(
         plan: Plan,
         onProgress: (Plan, TaskNode, TaskStatus) -> Unit
     ): TaskExecutionResult {
-        val outcome = executor.execute(task, plan, context)
-        outcome.pendingApproval?.let { action ->
-            val awaiting = storePendingApproval(task, action)
-            return TaskExecutionResult(
-                updatedTask = awaiting,
-                success = false,
-                pendingApproval = action
-            )
-        }
-        return if (outcome.success) {
-            TaskExecutionResult(
-                updatedTask = task.copy(
-                    status = TaskStatus.COMPLETED,
-                    result = outcome.output?.take(MAX_TASK_RESULT_CHARS),
-                    error = null,
-                    completedAt = System.currentTimeMillis()
+        var currentTask = task.copy(status = TaskStatus.RUNNING)
+        var lastError: String? = null
+
+        for (attempt in 0..task.maxRetries.coerceIn(0, MAX_TASK_RETRIES)) {
+            if (attempt > 0) {
+                currentTask = currentTask.copy(retryCount = attempt)
+                delay(RETRY_BACKOFF_BASE_MS * attempt)
+            }
+            onProgress(plan, currentTask, TaskStatus.RUNNING)
+            val outcome = executor.execute(
+                currentTask,
+                plan.copy(
+                    tasks = plan.tasks.map { if (it.id == currentTask.id) currentTask else it }
                 ),
-                success = true
+                context
             )
-        } else {
-            TaskExecutionResult(
-                updatedTask = task.copy(
-                    status = TaskStatus.FAILED,
-                    error = outcome.error ?: "The task executor did not produce a result.",
-                    completedAt = System.currentTimeMillis()
-                ),
-                success = false
-            )
+
+            outcome.pendingApproval?.let { action ->
+                val awaiting = storePendingApproval(currentTask, action)
+                return TaskExecutionResult(
+                    updatedTask = awaiting,
+                    success = false,
+                    pendingApproval = action
+                )
+            }
+
+            if (outcome.success) {
+                return TaskExecutionResult(
+                    updatedTask = currentTask.copy(
+                        status = TaskStatus.COMPLETED,
+                        result = outcome.output?.take(MAX_TASK_RESULT_CHARS),
+                        error = null,
+                        completedAt = System.currentTimeMillis()
+                    ),
+                    success = true
+                )
+            }
+
+            lastError = outcome.error ?: "The task executor did not produce a result."
+            if (!outcome.retryable || attempt >= task.maxRetries.coerceIn(0, MAX_TASK_RETRIES)) {
+                break
+            }
         }
+
+        return TaskExecutionResult(
+            updatedTask = currentTask.copy(
+                status = TaskStatus.FAILED,
+                error = lastError,
+                completedAt = System.currentTimeMillis()
+            ),
+            success = false
+        )
     }
 
     private fun parseTasksFromReasoning(
@@ -819,6 +842,8 @@ class TaskPlanner(
         const val MAX_PLAN_TASKS = 50
         const val MAX_TASK_ARGUMENTS = 50
         const val MAX_TASK_DURATION_MS = 24L * 60 * 60 * 1_000
+        const val MAX_TASK_RETRIES = 3
+        const val RETRY_BACKOFF_BASE_MS = 500L
     }
 
     private data class TaskExecutionResult(
