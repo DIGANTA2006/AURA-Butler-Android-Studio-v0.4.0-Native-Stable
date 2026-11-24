@@ -24,12 +24,11 @@ import java.time.Instant
 import java.util.UUID
 
 /** Production action gateway for accepted proactive suggestions. */
-class AndroidProactiveActionHandler(context: Context) : ProactiveEngine.ActionHandler {
+class AndroidProactiveActionHandler(
+    context: Context,
+    private val planningRuntime: AndroidPlanningRuntime
+) : ProactiveEngine.ActionHandler {
     private val appContext = context.applicationContext
-
-    private val planningRuntime by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        AndroidPlanningRuntime(appContext)
-    }
 
     override suspend fun execute(
         action: ProactiveEngine.ProactiveAction,
