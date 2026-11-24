@@ -35,6 +35,7 @@ import `in`.diganta.aurabutler.intelligence.AndroidProactiveActionHandler
 import `in`.diganta.aurabutler.intelligence.AndroidProactiveContextProvider
 import `in`.diganta.aurabutler.intelligence.EncryptedProactivePersistence
 import `in`.diganta.aurabutler.intelligence.ProactiveEngine
+import `in`.diganta.aurabutler.intelligence.AndroidProactiveScheduler
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ActionHistoryItem
 import `in`.diganta.aurabutler.model.AppTab
@@ -125,6 +126,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
         // loadPendingActions() filters expired/legacy entries. Persist the clean
         // list immediately so stale approvals cannot survive indefinitely on disk.
         store.savePendingActions(initialState.pendingActions)
+        if (_uiState.value.settings.proactiveSuggestionsEnabled) {
+            AndroidProactiveScheduler.ensureScheduled(getApplication())
+        } else {
+            AndroidProactiveScheduler.cancel(getApplication())
+        }
         refreshProactiveSuggestions()
     }
 
@@ -1125,9 +1131,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshProactiveSuggestions() {
         if (!_uiState.value.settings.proactiveSuggestionsEnabled) {
+            AndroidProactiveScheduler.cancel(getApplication())
             _uiState.update { it.copy(proactiveSuggestions = emptyList()) }
             return
         }
+        AndroidProactiveScheduler.ensureScheduled(getApplication())
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val engine = proactiveEngine()
