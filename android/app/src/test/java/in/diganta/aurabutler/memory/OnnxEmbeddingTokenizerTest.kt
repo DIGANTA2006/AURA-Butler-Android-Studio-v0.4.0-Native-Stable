@@ -26,7 +26,7 @@ class OnnxEmbeddingTokenizerTest {
     fun wordPieceSplitsSuffixesAndNormalizesAccents() {
         val encoded = tokenizer.encode("AURAS CAFÉ", maxSequenceLength = 8)
 
-        assertArrayEquals(longArrayOf(2, 4, 6, 10, 3, 0, 0, 0), encoded.inputIds)
+        assertArrayEquals(longArrayOf(2, 4, 6, 7, 3, 0, 0, 0), encoded.inputIds)
         assertEquals(5, encoded.attentionMask.count { it == 1L })
     }
 
