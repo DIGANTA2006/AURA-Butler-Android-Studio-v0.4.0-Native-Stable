@@ -8,8 +8,6 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import `in`.diganta.aurabutler.MainActivity
-import `in`.diganta.aurabutler.R
 import `in`.diganta.aurabutler.domain.ActionSafetyPolicy
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ActionRisk
@@ -93,9 +91,13 @@ class AndroidProactiveActionHandler(
         }
         val message = SecretRedactor.redact(raw, 500)
         createNotificationChannel()
-        val intent = Intent(appContext, MainActivity::class.java).addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        )
+        val intent = appContext.packageManager
+            .getLaunchIntentForPackage(appContext.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            ?: return ProactiveEngine.ActionResult(
+                completed = false,
+                error = "AURA could not resolve its launcher activity for the notification."
+            )
         val pending = PendingIntent.getActivity(
             appContext,
             NOTIFICATION_REQUEST_CODE,
@@ -103,7 +105,7 @@ class AndroidProactiveActionHandler(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_aura)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
