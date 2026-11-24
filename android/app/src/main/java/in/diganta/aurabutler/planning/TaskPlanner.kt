@@ -2,6 +2,11 @@ package `in`.diganta.aurabutler.planning
 
 import `in`.diganta.aurabutler.intelligence.ReasoningEngine
 import `in`.diganta.aurabutler.model.ConversationContext
+import `in`.diganta.aurabutler.model.ButlerAction
+import `in`.diganta.aurabutler.model.ActionKind
+import `in`.diganta.aurabutler.model.ActionRisk
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -18,7 +23,9 @@ import java.util.concurrent.atomic.AtomicInteger
 class TaskPlanner(
     private val reasoningEngine: ReasoningEngine,
     private val toolRegistry: ReasoningEngine.ToolRegistry,
-    private val planStore: PlanStore
+    private val planStore: PlanStore,
+    private val executor: ProductionTaskExecutor =
+        ProductionTaskExecutor(reasoningEngine, toolRegistry)
 ) {
 
     data class TaskNode(
@@ -59,6 +66,7 @@ class TaskPlanner(
         FAILED,
         SKIPPED,
         BLOCKED,
+        AWAITING_APPROVAL,
         CANCELLED
     }
 
@@ -91,7 +99,8 @@ class TaskPlanner(
         val failedTasks: Int,
         val totalDurationMs: Long,
         val finalOutput: String?,
-        val errorSummary: String?
+        val errorSummary: String?,
+        val pendingApproval: ButlerAction? = null
     )
 
     /**
@@ -152,12 +161,11 @@ class TaskPlanner(
         )
         val taskMap = mutablePlan.tasks.associateBy { it.id }.toMutableMap()
         var currentTaskId: String? = null
-        var completedCount = 0
-        var failedCount = 0
+        var completedCount = taskMap.values.count { it.status == TaskStatus.COMPLETED }
+        var failedCount = taskMap.values.count { it.status == TaskStatus.FAILED }
         var errorSummary: String? = null
         val startTime = System.currentTimeMillis()
 
-        // Persist the active transition before any task can run.
         planStore.save(mutablePlan)
 
         try {
@@ -169,14 +177,45 @@ class TaskPlanner(
                 val task = taskMap[taskId]
                     ?: throw IllegalStateException("Plan task disappeared: $taskId")
 
+                if (task.status == TaskStatus.COMPLETED || task.status == TaskStatus.SKIPPED) {
+                    currentTaskId = null
+                    continue
+                }
+
+                if (task.status == TaskStatus.AWAITING_APPROVAL) {
+                    val action = restorePendingApproval(task)
+                        ?: throw IllegalStateException(
+                            "A persisted approval checkpoint is missing its validated action."
+                        )
+                    val pausedPlan = mutablePlan.copy(
+                        status = PlanStatus.PAUSED,
+                        tasks = taskMap.values.toList(),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    planStore.save(pausedPlan)
+                    currentTaskId = null
+                    return@withContext ExecutionResult(
+                        planId = planId,
+                        success = false,
+                        completedTasks = completedCount,
+                        failedTasks = failedCount,
+                        totalDurationMs = System.currentTimeMillis() - startTime,
+                        finalOutput = "Plan paused. Approval is required for: " + action.title,
+                        errorSummary = null,
+                        pendingApproval = action
+                    )
+                }
+
                 if (!dependenciesMet(task, taskMap)) {
                     val blockedTask = task.copy(
                         status = TaskStatus.BLOCKED,
-                        error = "A dependency did not complete successfully."
+                        error = "A dependency did not complete successfully.",
+                        completedAt = System.currentTimeMillis()
                     )
                     taskMap[taskId] = blockedTask
                     planStore.save(
                         mutablePlan.copy(
+                            status = PlanStatus.ACTIVE,
                             tasks = taskMap.values.toList(),
                             updatedAt = System.currentTimeMillis()
                         )
@@ -190,13 +229,11 @@ class TaskPlanner(
                     continue
                 }
 
-                // Record an in-flight state before entering a potentially long
-                // provider/action call. Cancellation will turn this into an
-                // explicit CANCELLED task, never a false success or auto-retry.
                 val runningTask = task.copy(
                     status = TaskStatus.RUNNING,
                     startedAt = task.startedAt ?: System.currentTimeMillis(),
-                    error = null
+                    error = null,
+                    completedAt = null
                 )
                 taskMap[taskId] = runningTask
                 planStore.save(
@@ -213,6 +250,31 @@ class TaskPlanner(
                     onProgress
                 )
                 taskMap[taskId] = result.updatedTask
+
+                if (result.pendingApproval != null) {
+                    val pausedPlan = mutablePlan.copy(
+                        status = PlanStatus.PAUSED,
+                        tasks = taskMap.values.toList(),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    planStore.save(pausedPlan)
+                    onProgress(
+                        pausedPlan,
+                        result.updatedTask,
+                        TaskStatus.AWAITING_APPROVAL
+                    )
+                    currentTaskId = null
+                    return@withContext ExecutionResult(
+                        planId = planId,
+                        success = false,
+                        completedTasks = completedCount,
+                        failedTasks = failedCount,
+                        totalDurationMs = System.currentTimeMillis() - startTime,
+                        finalOutput = "Plan paused for approval: " + result.pendingApproval.title,
+                        errorSummary = null,
+                        pendingApproval = result.pendingApproval
+                    )
+                }
 
                 if (result.updatedTask.status == TaskStatus.COMPLETED) {
                     completedCount++
@@ -231,9 +293,6 @@ class TaskPlanner(
                     }
                 }
 
-                // Persist every terminal task transition, not just optional
-                // checkpoints. The current PlanStore remains process-local, but
-                // the latest in-process state is consistent for UI/recovery.
                 planStore.save(
                     mutablePlan.copy(
                         tasks = taskMap.values.toList(),
@@ -250,9 +309,11 @@ class TaskPlanner(
 
             val allTasks = taskMap.values.toList()
             val finalStatus = when {
-                failedCount > 0 -> PlanStatus.FAILED
-                allTasks.isNotEmpty() && allTasks.all { it.status == TaskStatus.COMPLETED } ->
-                    PlanStatus.COMPLETED
+                failedCount > 0 || allTasks.any { it.status == TaskStatus.BLOCKED } ->
+                    PlanStatus.FAILED
+                allTasks.isNotEmpty() && allTasks.all {
+                    it.status == TaskStatus.COMPLETED || it.status == TaskStatus.SKIPPED
+                } -> PlanStatus.COMPLETED
                 else -> PlanStatus.FAILED
             }
             val finalOutput = synthesizePlanOutput(allTasks, mutablePlan.description)
@@ -326,157 +387,131 @@ class TaskPlanner(
         }
     }
 
+    /**
+     * Completes an approval-gated task after ActionExecutor has actually
+     * returned success/failure from the user's explicit approval.
+     */
+    fun resolveApproval(
+        planId: String,
+        taskId: String,
+        actionId: String,
+        approved: Boolean,
+        executionDetail: String
+    ): Boolean {
+        val plan = planStore.get(planId) ?: return false
+        val task = plan.tasks.firstOrNull { it.id == taskId } ?: return false
+        if (task.status != TaskStatus.AWAITING_APPROVAL) return false
+        val pending = restorePendingApproval(task) ?: return false
+        if (pending.id != actionId || pending.isExpired()) return false
+
+        val taskArguments = task.toolArguments - "_approvalAction"
+        val updatedTask = if (approved) {
+            task.copy(
+                status = TaskStatus.COMPLETED,
+                result = executionDetail.take(MAX_TASK_RESULT_CHARS),
+                error = null,
+                completedAt = System.currentTimeMillis(),
+                toolArguments = taskArguments
+            )
+        } else {
+            task.copy(
+                status = TaskStatus.SKIPPED,
+                result = null,
+                error = "The user declined the proposed action. No action was executed.",
+                completedAt = System.currentTimeMillis(),
+                toolArguments = taskArguments
+            )
+        }
+        planStore.save(
+            plan.copy(
+                status = PlanStatus.ACTIVE,
+                tasks = plan.tasks.map { if (it.id == taskId) updatedTask else it },
+                completedAt = null,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        return true
+    }
+
+    private fun restorePendingApproval(task: TaskNode): ButlerAction? {
+        val encoded = task.toolArguments["_approvalAction"] as? Map<*, *> ?: return null
+        return runCatching {
+            val payloadRaw = encoded["payload"] as? Map<*, *> ?: emptyMap<Any, Any>()
+            val payload = payloadRaw.entries.associate { entry ->
+                val key = entry.key as? String
+                    ?: throw IllegalArgumentException("Invalid approval payload key.")
+                key to (entry.value?.toString()
+                    ?: throw IllegalArgumentException("Invalid approval payload value."))
+            }
+            ButlerAction(
+                id = encoded["id"]?.toString() ?: return null,
+                kind = ActionKind.valueOf(encoded["kind"]?.toString() ?: return null),
+                title = encoded["title"]?.toString() ?: return null,
+                summary = encoded["summary"]?.toString() ?: return null,
+                risk = ActionRisk.valueOf(encoded["risk"]?.toString() ?: return null),
+                payload = payload,
+                createdAtEpochMs = (encoded["createdAtEpochMs"] as? Number)?.toLong()
+                    ?: return null,
+                expiresAtEpochMs = (encoded["expiresAtEpochMs"] as? Number)?.toLong()
+                    ?: return null
+            )
+        }.getOrNull()
+    }
+
+    private fun storePendingApproval(task: TaskNode, action: ButlerAction): TaskNode {
+        val encoded = mapOf<String, Any>(
+            "id" to action.id,
+            "kind" to action.kind.name,
+            "title" to action.title,
+            "summary" to action.summary,
+            "risk" to action.risk.name,
+            "createdAtEpochMs" to action.createdAtEpochMs,
+            "expiresAtEpochMs" to action.expiresAtEpochMs,
+            "payload" to action.payload
+        )
+        return task.copy(
+            status = TaskStatus.AWAITING_APPROVAL,
+            error = "Waiting for explicit user approval.",
+            completedAt = null,
+            toolArguments = task.toolArguments + ("_approvalAction" to encoded)
+        )
+    }
+
     private suspend fun executeTaskWithRetry(
         task: TaskNode,
         context: ConversationContext,
         plan: Plan,
         onProgress: (Plan, TaskNode, TaskStatus) -> Unit
     ): TaskExecutionResult {
-        var currentTask = task.copy(status = TaskStatus.RUNNING, startedAt = System.currentTimeMillis())
-        var lastError: String? = null
-
-        for (attempt in 0..task.maxRetries) {
-            if (attempt > 0) {
-                currentTask = currentTask.copy(retryCount = attempt)
-            }
-
-            onProgress(plan, currentTask, TaskStatus.RUNNING)
-
-            val result = executeSingleTask(currentTask, context)
-            
-            if (result.success) {
-                return TaskExecutionResult(
-                    updatedTask = currentTask.copy(
-                        status = TaskStatus.COMPLETED,
-                        result = result.output,
-                        completedAt = System.currentTimeMillis()
-                    ),
-                    success = true
-                )
-            } else {
-                lastError = result.error
-                // Brief delay before retry
-                if (attempt < task.maxRetries) {
-                    delay(1_000L * (attempt + 1))
-                }
-            }
-        }
-
-        return TaskExecutionResult(
-            updatedTask = currentTask.copy(
-                status = TaskStatus.FAILED,
-                error = lastError,
-                completedAt = System.currentTimeMillis()
-            ),
-            success = false
-        )
-    }
-
-    private suspend fun executeSingleTask(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        return try {
-            when (task.type) {
-                TaskType.RESEARCH -> executeResearch(task, context)
-                TaskType.ANALYSIS -> executeAnalysis(task, context)
-                TaskType.EXECUTION -> executeAction(task, context)
-                TaskType.CREATION -> executeCreation(task, context)
-                TaskType.VERIFICATION -> executeVerification(task, context)
-                TaskType.COMMUNICATION -> executeCommunication(task, context)
-                TaskType.DECISION -> executeDecision(task, context)
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (e: Exception) {
-            SingleTaskResult(success = false, output = null, error = e.message)
-        }
-    }
-
-    private fun executeResearch(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val tool = task.tool ?: "web_search"
-        val toolDef = toolRegistry.getTool(tool)
-        
-        if (toolDef == null) {
-            return SingleTaskResult(false, null, "Tool not found: $tool")
-        }
-
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "The '$tool' tool is registered but has no live executor. No research was performed."
-        )
-    }
-
-    private suspend fun executeAnalysis(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        // Use reasoning engine for analysis
-        val reasoningResult = reasoningEngine.reason(
-            task = "Analyze: ${task.description}\nContext: ${task.toolArguments}",
-            context = context,
-            options = ReasoningEngine.ReasoningOptions(enableToolUse = false)
-        )
-        
-        val answer = reasoningResult.finalAnswer.trim()
-        val credible = answer.isNotBlank() &&
-            reasoningResult.confidence >= MIN_ANALYSIS_CONFIDENCE &&
-            !answer.startsWith("The configured AI provider did not return an answer.")
-        return if (credible) {
-            SingleTaskResult(true, answer, null)
-        } else {
-            SingleTaskResult(
+        val outcome = executor.execute(task, plan, context)
+        outcome.pendingApproval?.let { action ->
+            val awaiting = storePendingApproval(task, action)
+            return TaskExecutionResult(
+                updatedTask = awaiting,
                 success = false,
-                output = null,
-                error = "Analysis was not completed: no sufficiently reliable provider answer was available."
+                pendingApproval = action
             )
         }
-    }
-
-    private fun executeAction(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        val tool = task.tool ?: "run_command"
-        val toolDef = toolRegistry.getTool(tool)
-        
-        if (toolDef == null) {
-            return SingleTaskResult(false, null, "Tool not found: $tool")
+        return if (outcome.success) {
+            TaskExecutionResult(
+                updatedTask = task.copy(
+                    status = TaskStatus.COMPLETED,
+                    result = outcome.output?.take(MAX_TASK_RESULT_CHARS),
+                    error = null,
+                    completedAt = System.currentTimeMillis()
+                ),
+                success = true
+            )
+        } else {
+            TaskExecutionResult(
+                updatedTask = task.copy(
+                    status = TaskStatus.FAILED,
+                    error = outcome.error ?: "The task executor did not produce a result.",
+                    completedAt = System.currentTimeMillis()
+                ),
+                success = false
+            )
         }
-
-        if (toolDef.requiresConfirmation) {
-            return SingleTaskResult(false, null, "Action requires user confirmation: ${task.description}")
-        }
-
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "No action executor is connected for '$tool'. No device or external action was performed."
-        )
-    }
-
-    private fun executeCreation(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "No file/content creation executor is connected. Nothing was written."
-        )
-    }
-
-    private fun executeVerification(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "No verification engine is connected. The task has not been verified."
-        )
-    }
-
-    private fun executeCommunication(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "No communication-channel executor is connected. No message was sent."
-        )
-    }
-
-    private fun executeDecision(task: TaskNode, context: ConversationContext): SingleTaskResult {
-        return SingleTaskResult(
-            success = false,
-            output = null,
-            error = "No condition evaluator is connected. No decision branch was executed."
-        )
     }
 
     private fun parseTasksFromReasoning(trace: List<ReasoningEngine.ReasoningStep>, finalAnswer: String): List<TaskNode> {
@@ -635,18 +670,13 @@ class TaskPlanner(
     )
 
     private companion object {
-        const val MIN_ANALYSIS_CONFIDENCE = 0.55
+        const val MAX_TASK_RESULT_CHARS = 12_000
     }
 
     private data class TaskExecutionResult(
         val updatedTask: TaskNode,
-        val success: Boolean
-    )
-
-    private data class SingleTaskResult(
         val success: Boolean,
-        val output: String?,
-        val error: String?
+        val pendingApproval: ButlerAction? = null
     )
 }
 
