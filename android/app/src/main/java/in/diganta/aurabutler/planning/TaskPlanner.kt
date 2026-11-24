@@ -420,7 +420,7 @@ class TaskPlanner(
         val expired = pending.isExpired()
         val updatedTask = when {
             expired -> task.copy(
-                status = TaskStatus.FAILED,
+                status = TaskStatus.SKIPPED,
                 result = null,
                 error = "The approval expired before execution. The action was not run.",
                 completedAt = System.currentTimeMillis(),
