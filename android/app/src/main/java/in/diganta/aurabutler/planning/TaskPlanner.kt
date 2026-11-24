@@ -414,19 +414,26 @@ class TaskPlanner(
         val task = plan.tasks.firstOrNull { it.id == taskId } ?: return false
         if (task.status != TaskStatus.AWAITING_APPROVAL) return false
         val pending = restorePendingApproval(task) ?: return false
-        if (pending.id != actionId || pending.isExpired()) return false
+        if (pending.id != actionId) return false
 
         val taskArguments = task.toolArguments - "_approvalAction"
-        val updatedTask = if (approved) {
-            task.copy(
+        val expired = pending.isExpired()
+        val updatedTask = when {
+            expired -> task.copy(
+                status = TaskStatus.FAILED,
+                result = null,
+                error = "The approval expired before execution. The action was not run.",
+                completedAt = System.currentTimeMillis(),
+                toolArguments = taskArguments
+            )
+            approved -> task.copy(
                 status = TaskStatus.COMPLETED,
                 result = executionDetail.take(MAX_TASK_RESULT_CHARS),
                 error = null,
                 completedAt = System.currentTimeMillis(),
                 toolArguments = taskArguments
             )
-        } else {
-            task.copy(
+            else -> task.copy(
                 status = TaskStatus.SKIPPED,
                 result = null,
                 error = "The user declined the proposed action. No action was executed.",
