@@ -1,5 +1,9 @@
 package `in`.diganta.aurabutler.intelligence
 
+private const val MIN_REFRESH_INTERVAL_MS = 60_000L
+private const val MIN_SUGGESTION_CONFIDENCE = 0.4
+
+
 import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
