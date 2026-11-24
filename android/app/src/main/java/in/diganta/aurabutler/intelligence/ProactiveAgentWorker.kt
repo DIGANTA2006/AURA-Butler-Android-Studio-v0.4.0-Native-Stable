@@ -41,6 +41,7 @@ class ProactiveAgentWorker(
 
         var embeddingProvider: OnnxSentenceEmbeddingProvider? = null
         var semanticPersistence: EncryptedSemanticMemoryPersistence? = null
+        var proactivePersistence: EncryptedProactivePersistence? = null
         var semanticMemory: SemanticMemory? = null
         var engine: ProactiveEngine? = null
 
@@ -69,12 +70,13 @@ class ProactiveAgentWorker(
             }
 
             val planningRuntime = AndroidPlanningRuntime(applicationContext)
+            proactivePersistence = EncryptedProactivePersistence(applicationContext)
             engine = ProactiveEngine(
                 aiProvider = HybridAiProvider(),
                 semanticMemory = semanticMemory,
                 settings = settings,
                 contextProvider = AndroidProactiveContextProvider(applicationContext) { context },
-                persistence = EncryptedProactivePersistence(applicationContext),
+                persistence = proactivePersistence,
                 actionHandler = AndroidProactiveActionHandler(
                     applicationContext,
                     planningRuntime
@@ -92,6 +94,7 @@ class ProactiveAgentWorker(
             engine?.stop()
             embeddingProvider?.close()
             semanticPersistence?.close()
+            proactivePersistence?.close()
         }
     }
 
