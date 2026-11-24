@@ -1464,6 +1464,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         proactiveEngineInstance?.stop()
         proactiveEngineInstance = null
+        butler.close()
         if (planningRuntimeDelegate.isInitialized()) planningRuntime.close()
         super.onCleared()
     }
