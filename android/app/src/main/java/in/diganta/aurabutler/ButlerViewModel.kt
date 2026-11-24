@@ -1123,7 +1123,6 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     actionHandler = AndroidProactiveActionHandler(application, planningRuntime)
                 ).also { engine ->
                     proactiveEngineInstance = engine
-                    engine.start()
                 }
             }
         }
