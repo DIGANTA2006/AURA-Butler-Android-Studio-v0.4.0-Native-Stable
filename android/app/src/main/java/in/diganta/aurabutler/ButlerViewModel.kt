@@ -434,6 +434,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                resumePlannerAfterApproval(
+                    action,
+                    approved = true,
+                    detail = result.detail
+                )
             }
 
             is ExecutionResult.Failure -> {
@@ -458,13 +463,6 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 resumePlannerAfterApproval(action, approved = false, detail = result.reason)
             }
-        }
-        if (resultIsSuccessForPlan(action)) {
-            resumePlannerAfterApproval(
-                action,
-                approved = true,
-                detail = "AURA ActionExecutor completed: " + action.title
-            )
         }
     }
 
@@ -1074,7 +1072,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
         if (normalized.startsWith(resumePrefix, ignoreCase = true)) {
             val id = normalized.substring(resumePrefix.length).trim()
             return id.takeIf { it.matches(Regex("[A-Za-z0-9._-]{8,100}")) }
-                ?.let(PlanningCommand::Resume)
+                ?.let { PlanningCommand.Resume(it) }
         }
         return null
     }
@@ -1105,7 +1103,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 planningReply(plan.id, plan.title, result)
             }
             is PlanningCommand.Resume -> {
-                val plan = planner.getPlan(command.planId)
+                val plan = planningRuntime.getPlan(command.planId)
                     ?: return ButlerReply(
                         assistantMessage = "I couldn't find plan ${command.planId}.",
                         speechText = "I couldn't find that plan.",
@@ -1127,10 +1125,10 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     ): ButlerReply {
         val approval = result.pendingApproval
         val message = buildString {
-            append("Plan: ").append(title).append("\\n")
-            append("Plan ID: ").append(planId).append("\\n")
+            append("Plan: ").append(title).append("\n")
+            append("Plan ID: ").append(planId).append("\n")
             append("Completed tasks: ").append(result.completedTasks)
-                .append(" | Failed tasks: ").append(result.failedTasks).append("\\n")
+                .append(" | Failed tasks: ").append(result.failedTasks).append("\n")
             if (approval != null) {
                 append("Paused for your approval: ").append(approval.title)
                     .append(". Review the approval card below.")
@@ -1150,11 +1148,6 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             provider = "local-planner",
             intent = if (approval != null) "plan_approval" else "plan_result"
         )
-    }
-
-    private fun resultIsSuccessForPlan(action: ButlerAction): Boolean {
-        // This method is reached only after ActionExecutor returned Success.
-        return action.payload[ProductionTaskExecutor.PLAN_ID_ARGUMENT].isNullOrBlank().not()
     }
 
     private fun resumePlannerAfterApproval(
@@ -1183,7 +1176,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     settings = current.settings
                 )
                 val result = planner.executePlan(planId, context)
-                val plan = planner.getPlan(planId)
+                val plan = planningRuntime.getPlan(planId)
                 val approval = result.pendingApproval
                 if (approval != null) {
                     _uiState.update { state ->
@@ -1199,7 +1192,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     val message = ChatMessage(
                         sender = Sender.AURA,
                         text = buildString {
-                            append(statusText).append("\\n")
+                            append(statusText).append("\n")
                             append("Plan ID: ").append(planId).append("\\n")
                             append(result.finalOutput ?: result.errorSummary ?: plan?.status?.name.orEmpty())
                         },
