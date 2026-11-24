@@ -32,7 +32,7 @@ class OnnxEmbeddingTokenizerTest {
 
     @Test
     fun unknownWordsUseTheUnknownTokenAndLongInputsAreTruncatedSafely() {
-        val unknown = tokenizer.encode("an-unseen-token", maxSequenceLength = 6)
+        val unknown = tokenizer.encode("unseen", maxSequenceLength = 6)
         assertEquals(1L, unknown.inputIds[1])
         assertEquals(3L, unknown.inputIds[2])
 
