@@ -892,8 +892,8 @@ class PlanStore(
      */
     @Synchronized
     fun reload() {
-        val restored = persistence?.loadAll().orEmpty()
-            .take(MAX_PERSISTED_PLANS)
+        val repository = persistence ?: return
+        val restored = repository.loadAll().take(MAX_PERSISTED_PLANS)
         plans.clear()
         versions.clear()
         restored.forEach { state ->
