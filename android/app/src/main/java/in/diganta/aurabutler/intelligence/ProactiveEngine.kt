@@ -440,12 +440,38 @@ class ProactiveEngine(
             description = "Generates a morning summary of schedule, weather, and priorities",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
             enabled = false, // Disabled until its required data source is integrated
-            task = { _ ->
-                AgentResult(
-                    success = false,
-                    output = "Daily briefing is unavailable: calendar and weather data sources are not connected.",
-                    error = "Daily briefing integrations are not configured."
-                )
+            task = { context ->
+                val device = context.deviceState
+                val recent = context.recentMessages
+                    .filter { !SecretRedactor.containsSensitive(it) }
+                    .takeLast(5)
+                    .map { SecretRedactor.redact(it, 280) }
+                buildString {
+                    append("AURA daily briefing — ")
+                    append(java.text.DateFormat.getDateTimeInstance().format(java.util.Date()))
+                    append("\n\nDevice status: battery ")
+                    append(device.batteryLevel).append("%")
+                    append(if (device.isCharging) " (charging)" else "")
+                    append(", network ").append(device.networkType)
+                    append(", free app storage ")
+                    append(device.storageFreePercent.toInt()).append("%")
+                    append(", screen ").append(if (device.screenOn) "on" else "off")
+                    append(".")
+                    if (recent.isNotEmpty()) {
+                        append("\n\nRecent conversation topics:")
+                        recent.forEachIndexed { index, item ->
+                            append("\n").append(index + 1).append(". ").append(item)
+                        }
+                    }
+                    if (context.recentMemories.isNotEmpty()) {
+                        append("\n\nSaved memory index contains ")
+                        append(context.recentMemories.size)
+                        append(" relevant local entries.")
+                    }
+                    append("\n\nThis briefing uses local device and conversation context only; it does not claim calendar, email, or location access.")
+                }.let { output ->
+                    AgentResult(success = true, output = output.take(6_000))
+                }
             }
         ))
 
