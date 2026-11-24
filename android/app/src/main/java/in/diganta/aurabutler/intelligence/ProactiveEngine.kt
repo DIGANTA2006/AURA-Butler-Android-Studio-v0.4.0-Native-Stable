@@ -254,7 +254,9 @@ class ProactiveEngine(
     fun stop() {
         running = false
         scheduler.shutdownNow()
-        scope.cancel()
+        // Keep the IO scope reusable so a settings change can restart the scheduler.
+        // Scheduled futures are cancelled by scheduler.shutdownNow(); no background
+        // coroutine is left scheduled after the executor has been stopped.
     }
 
     @Volatile
