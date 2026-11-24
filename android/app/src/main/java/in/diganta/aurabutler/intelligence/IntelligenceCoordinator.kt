@@ -2,6 +2,10 @@ package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
+import `in`.diganta.aurabutler.data.KeylessLiveInfoProvider
+import `in`.diganta.aurabutler.memory.EncryptedSemanticMemoryPersistence
+import `in`.diganta.aurabutler.memory.EmbeddingProvider
+import `in`.diganta.aurabutler.memory.LazyOnnxSentenceEmbeddingProvider
 import `in`.diganta.aurabutler.memory.LocalEmbeddingProvider
 import `in`.diganta.aurabutler.memory.MemoryStore
 import `in`.diganta.aurabutler.memory.SemanticMemory
@@ -9,8 +13,11 @@ import `in`.diganta.aurabutler.model.ChatMessage
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.Sender
+import `in`.diganta.aurabutler.planning.EncryptedPlanStorePersistence
 import `in`.diganta.aurabutler.planning.PlanStore
+import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
 import `in`.diganta.aurabutler.planning.TaskPlanner
+import android.content.Context
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,17 +35,32 @@ import kotlinx.coroutines.withContext
 class IntelligenceCoordinator(
     private val aiProvider: AiProvider,
     private val settings: ButlerSettings,
-    private val contextProvider: ContextProvider
+    private val contextProvider: ContextProvider,
+    private val appContext: Context? = null
 ) {
 
     // Core intelligence components
     private val toolRegistry = ReasoningEngine.ToolRegistry()
     private val reasoningEngine = ReasoningEngine(aiProvider, toolRegistry)
-    private val embeddingProvider = LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
-    private val memoryStore = MemoryStore()
+    private val embeddingProvider: EmbeddingProvider = appContext?.let {
+        LazyOnnxSentenceEmbeddingProvider(it)
+    } ?: LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
+    private val memoryStore = MemoryStore(
+        persistence = appContext?.let(::EncryptedSemanticMemoryPersistence)
+    )
     private val semanticMemory = SemanticMemory(aiProvider, embeddingProvider, memoryStore)
-    private val planStore = PlanStore()
-    private val taskPlanner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
+    private val planStore = PlanStore(
+        persistence = appContext?.let(::EncryptedPlanStorePersistence)
+    )
+    private val taskPlanner = TaskPlanner(
+        reasoningEngine = reasoningEngine,
+        toolRegistry = toolRegistry,
+        planStore = planStore,
+        executor = ProductionTaskExecutor(
+            reasoningEngine = reasoningEngine,
+            liveInfo = KeylessLiveInfoProvider(appContext)
+        )
+    )
     private val proactiveEngine = ProactiveEngine(aiProvider, semanticMemory, settings, contextProvider)
 
     // State
