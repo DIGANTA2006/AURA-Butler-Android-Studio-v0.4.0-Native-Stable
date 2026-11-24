@@ -1,0 +1,4 @@
+{$AURA_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy aura-voip:8765
+}

@@ -1,0 +1,8 @@
+# Self-hosted, local-inference VoIP endpoint. All media and inference run on owner-controlled infrastructure.
+aiortc==1.16.0
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+faster-whisper==1.2.1
+piper-tts==1.8.0
+webrtcvad-wheels==2.0.14.post1
+numpy==2.2.6

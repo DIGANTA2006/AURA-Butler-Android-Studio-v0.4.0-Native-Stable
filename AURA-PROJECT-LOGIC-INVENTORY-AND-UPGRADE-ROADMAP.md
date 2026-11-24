@@ -310,14 +310,113 @@ This section records the repository changes made after the original source inven
 - `StudentBudgetConfig` defaults currently use zero/unlimited limits until a manifest supplies limits. Confirm that this is the intended deployment policy before enabling broad public-provider usage.
 - Physical Android acceptance remains outstanding for full-duplex capture, device AEC/NS effectiveness, sustained arbitrary-phrase barge-in, Piper fallback behaviour, long-session resource cleanup and false-trigger/echo performance. Code-path presence and emulator/CI success do not prove these acoustic behaviours on a handset.
 
-### Current Git and verification boundary
+### Git and verification boundary after merge
 
-- Working branch: `feat/aura-domain-logic-upgrade`.
-- Pull request: [#2](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/pull/2), still deliberately a draft and unmerged.
-- Base `main`: `ed97788c9d74d2377190cd47eb7150606aef6270`; no commits in this continuation were pushed to `main`.
-- Source inventory at this snapshot: **604 tracked files, 100 production Kotlin files, 34 Kotlin test/instrumentation files** (reconciled from the recursive branch tree).
-- Full Android CI passed on branch head `9881cdc636356030efc3ed38072a9c38a489393d`, run [#45229881956](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/actions/runs/45229881956): unit tests passed, Android lint passed, and `assembleDebug` passed. This validates the repository build and unit tests on the runner; it does not replace physical-device voice acceptance.
+- Pull request [#2](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/pull/2) was merged on **24 November 2026 at 01:37 UTC**.
+- Production `main` is merge commit `d1167ac9f334ae90d98faeae65b789bee92ecad8`.
+- The merged source inventory is **604 tracked files, 100 production Kotlin files and 34 Kotlin test/instrumentation files**, reconciled from the recursive `main` tree.
+- Post-merge Android CI [#45306443108](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/actions/runs/45306443108) passed on the merge commit: unit tests, Android lint and `assembleDebug` all succeeded. This is runner validation, not physical-device voice acceptance.
+
+## 9. Post-merge full-source audit and remaining implementation — 24 November 2026
+
+The merged `main` tree was re-enumerated and all **100 production Kotlin source files** were fetched for a source-level static pass. This completes the inventory/reconciliation step; it does **not** mean every logic file has been redesigned or individually rewritten.
+
+### Confirmed additional cancellation defects and follow-up patch
+
+The static pass found that keyless knowledge fallback and ViewModel chat/document/image-analysis error paths could convert coroutine cancellation into a fallback, error message or alternate-provider attempt. These paths have been corrected on the follow-up branch `feat/aura-cross-domain-completion-phase-2` using `runCatchingCancellable` and explicit `CancellationException` rethrows. This follow-up is not yet merged; it requires CI validation.
+
+### Remaining high-priority work — not complete
+
+1. **Semantic memory durability and genuine embeddings.** The live app's ordinary private memories and temporal history are persisted through `SecureStore` → `PrivateMemoryStore` / `TemporalMemoryStore`. The separate `SemanticMemory.MemoryStore` used by `IntelligenceCoordinator` is still process-local, and it is not backed by those durable stores. `LocalEmbeddingProvider` currently uses deterministic lexical feature hashing; the configured ONNX model path is not loaded. Actual ONNX inference, embedding-quality evaluation and durable semantic-index restoration remain unimplemented.
+2. **Durable task plans.** `PlanStore` is still an in-memory repository. Plan history and checkpoints do not survive process death.
+3. **Real task executors.** `TaskPlanner` has safe cancellation/state handling and honest result reporting, but research, device action, creation, verification, communication and decision task types do not have complete live executors. Unsupported task types fail rather than claim success.
+4. **Proactive action integration.** `ProactiveEngine` can generate and manage suggestions, but its action executor intentionally returns `false`. Suggestions cannot perform real actions until a reviewed executor is wired through the production approval, safety and audit path.
+5. **Advanced intelligence production wiring.** The running UI constructs `ProductionButlerEngine` around `LocalButlerEngine`. `IntelligenceCoordinator` and `EnhancedButlerEngine` remain a separate, non-production-wired path. Integrating them safely requires shared persistence, settings/context lifecycle, and tests that prove existing deterministic commands and approvals still win.
+6. **Voice hardware acceptance.** The code includes an AEC-gated natural-speech capture path plus wake-word fallback, but platform effect availability is not proof of effective echo cancellation. Test full-duplex capture, TTS self-echo rejection, owner speech sensitivity, latency, headset/speaker routing and Piper fallback on the target handset.
+7. **Blocking network interruption audit.** `SafeHttpClient` provides bounded synchronous HTTP calls. The remaining provider call sites need an explicit cancellation/connection-abort acceptance pass so a cancelled coroutine does not leave a blocking socket operation running until its read timeout.
+
+### Configuration decision, not a claimed defect
+
+`StudentBudgetConfig` deliberately documents zero daily limits as unlimited (“JARVIS MODE”). Confirm that this is still the intended owner policy before changing it; do not silently introduce artificial caps or treat the documented unlimited setting as an implementation defect.
+
+### Completion accounting
+
+- **Inventory and static source pass:** 100/100 production Kotlin files enumerated and scanned.
+- **PR #2 direct production-file touch count:** 17/100 files (17%). It also changed eight test files and the roadmap; shared changes such as `SafeHttpClient` and cancellation helpers affect multiple consumers, so this ratio is a direct-touch measure, not a feature-completion score.
+- **Automated build state on merged main:** green (unit tests + lint + debug APK).
+- **Overall request “upgrade every logic fully”:** **not complete**. The remaining work above is substantive engineering and hardware validation, not cosmetic cleanup.
 
 ## 10. Completion policy
 
 A subsystem is complete only when its source-level design, active call paths, settings/defaults, failure cases, unit tests, integration tests and relevant device behaviour have been verified. Report separately what is implemented, what is tested in CI, what is verified on physical hardware, and what remains unavailable or unverified.
+
+## 11. PR #3 implementation and verification status — 24 November 2026
+
+This section supersedes the Phase 2–5 implementation-gap bullets above where PR #3 now contains concrete code. It does not change the status of the merged `main` branch: all items below are on the open draft branch `feat/aura-cross-domain-completion-phase-2` until PR #3 is reviewed, validated and merged.
+
+### Implemented on the PR #3 branch
+
+- **Cancellation/lifecycle:** added explicit cancellation preservation through keyless knowledge fallback and the chat, document and private image-analysis ViewModel paths. Cancellation is rethrown instead of being converted into a fallback result or alternate-provider attempt.
+- **Phase 2 — ONNX semantic memory:** added a real ONNX Runtime sentence-embedding provider, WordPiece tokenizer, quantized MiniLM model/vocabulary download pinned to a fixed source revision and SHA-256 digests, bounded model download, verified installation marker, and AES-GCM/Android-Keystore encrypted SQLite storage for semantic memories and vectors. The live `ProductionButlerEngine` path reconciles the owner's private memories into the semantic store and uses hybrid retrieval when semantic memory is enabled. A further PR #3 fix synchronizes model download/cancellation with live settings changes; restart is not required.
+- **Phase 3 — planning:** added encrypted durable plan/checkpoint storage, reload support, a production Android planning composition root, and typed executors for live research, analysis, creation, verification, decisions, approval-gated actions, and communication drafts. Communication remains draft-only; the app does not claim to send messages. Side effects still require an explicit approval card.
+- **Phase 4 — proactive intelligence:** added encrypted persistence for suggestions and agent checkpoints, WorkManager scheduling/rehydration, local device/context agents, recurring-topic detection from user-authored AURA chat only, research follow-up from explicitly tagged local memories, notification handling and a production action gateway. The gateway routes external/device effects through the existing approval policy; arbitrary command execution from proactive suggestions is blocked.
+- **Phase 5 — production integration:** wired semantic retrieval into the active `ProductionButlerEngine` unresolved-request path; wired plan commands, plan approvals/resumption, proactive suggestions, approvals and encrypted proactive state into `ButlerViewModel`. `IntelligenceCoordinator` remains a separate legacy/orchestration class and is not the active chat composition root; do not count that class being present as proof that it is in the production call path.
+- **Live configuration correction:** enabling semantic memory after startup enqueues the verified model worker; disabling it cancels the unique pending model job. Both paths retain WorkManager's unmetered-network and battery-not-low constraints.
+
+### Validation boundary
+
+- The original PR #3 workflow run `45318149144` compiled Kotlin successfully and ran 182 unit tests, of which 179 passed and three failed in proactive-agent tests. Lint and APK assembly were skipped because the test task failed.
+- The three failing assertions were tied to the newer scheduled-agent behavior: habit detection is executed by the Habit Learning agent, disabled semantic consolidation is persisted as a disabled agent, and the Daily Briefing/Habit Learning/Research Follow-up agents are now enabled. Their tests were updated on the PR branch to exercise the agent execution path and assert the current enabled-agent contract.
+- The test updates and live semantic-memory settings correction are committed on the PR branch. **A passing rerun of the full workflow has not yet been verified.** The PR remains a draft and is not merged into `main`.
+- The ONNX tokenizer has unit coverage, but an actual downloaded model session, embedding output quality, encrypted Android Keystore/SQLite behavior, WorkManager recovery and plan-resume behavior still require device or integration acceptance. A successful Kotlin compilation alone does not validate those runtime paths.
+
+### Remaining work before production completion
+
+1. Obtain a fresh green PR workflow for the latest head: unit tests, Android lint and debug APK assembly. Fix any further failures rather than weakening assertions.
+2. Add or run Android integration tests against the actual SQLite/Keystore persistence adapters, verifying restart restoration, deletion, corruption handling, key invalidation and bounded retention.
+3. Run the pinned ONNX model on a supported ARM64 handset, validate model download/install/retry/cancellation, tensor compatibility, embedding dimension/finite values, semantic retrieval quality and memory/performance impact.
+4. Exercise complete task-plan flows on Android: create, execute, checkpoint, process death, restore, approval, rejection, expiry, resume, cancellation, retry and dependency failure. Verify every executor has honest outputs and idempotent side-effect boundaries.
+5. Exercise proactive WorkManager behavior across process death/reboot, duplicate scheduling, disabled settings, stale approvals, notification permission denial, retries and time-zone boundaries.
+6. Finish the blocking HTTP cancellation/connection-abort audit so cancellation does not leave synchronous sockets running until their read timeout.
+7. Complete physical-device voice acceptance on the target handset: full-duplex capture, AEC/NS effectiveness, TTS self-echo rejection, arbitrary-phrase barge-in, owner voice sensitivity, headset/speaker routing, latency, Piper fallback, long-session cleanup and false-trigger behavior.
+
+### Completion reporting
+
+Report these independently: implementation present on the PR branch; automated CI status for the exact latest commit; Android runtime/integration results; physical-device acceptance. Until each relevant item passes, the PR #3 upgrade must be described as implemented-in-progress, not fully production-complete.
+
+
+## 12. Zero-paid telephone Butler implementation and feasibility — 24 November 2026
+
+**Hard architecture decision:** the telephone feature must not introduce a paid third-party telephony, SIP/PSTN, AI-calling, ASR or TTS subscription. No Twilio, Plivo, Vonage, Telnyx, Vapi, Retell, paid gateway or paid voice API is permitted. The normal SIM path uses only the owner's existing SIM/carrier plan; the full conversational-AI path is a separate owner-controlled AURA-to-AURA VoIP service.
+
+### Native SIM call-management source added to the PR #3 working copy
+
+- Added `AuraPhoneActivity`, `AuraInCallService`, `AuraCallRegistry`, explicit call notifications/actions, call models and encrypted metadata-only call history.
+- Added `ROLE_DIALER` request flow, `ACTION_DIAL` intent handling, explicit user-initiated `TelecomManager.placeCall`, manual answer/reject/end, capability-aware hold/resume and audio-route controls.
+- Added history retention (30/90/180/365 days), bounded to 100 records, with deletion and clear-all controls. If Keystore-backed history cannot open, the UI reports that it is unavailable.
+- Added the phone entry point in Settings and a detailed architecture/acceptance document at `docs/AURA-ZERO-PAID-TELEPHONE-BUTLER.md`.
+- No cellular audio capture, audio injection, cellular recording, STT/TTS over SIM, covert recording, `CAPTURE_AUDIO_OUTPUT`, `READ_CALL_LOG`, root, hidden APIs or accessibility workaround is included.
+
+**Not yet wired or verified:** the existing voice command pipeline does not yet route spoken “answer/reject this call” commands into `AuraCallRegistry`; incoming approval is via the call UI or explicit notification action. There is no contact enrichment, screening/allowlist/automatic-answer policy, caller-purpose AI or post-call conversational report. Android CI and physical-device validation of these new files have not been run. Treat this as source implementation, not a release-ready dialer.
+
+### Independent AI VoIP path — implemented in source, validation pending
+
+The working copy now includes an Android AURA app-to-owner-hosted-local-AI WebRTC path: authenticated WSS signalling, short-lived owner coturn credentials, relay-only ICE, audio-only WebRTC/DTLS-SRTP, local VAD, faster-whisper ASR, Ollama local LLM and Piper local TTS. The service refuses startup when owner-provisioned local ASR/Piper models or credentials are missing; it does not download model weights or use external AI fallbacks. English, Bengali and Hindi voice paths are configured, but actual model quality and end-to-end audio acceptance remain unverified.
+
+Transcript/summary retention requires a clear caller yes in English, Bengali or Hindi. A clear no disables retention; two ambiguous answers also fail closed. No audio recording is written. Consent parsing and the two-step gate are deterministic and independently unit-tested. Transcript events are sent to Android only after consent, and the Android client stores them in encrypted local call history.
+
+The current endpoint supports only the Android AURA app calling the owner's local AI endpoint. It is not a general human-to-human AURA room relay, browser client, Android self-managed `PhoneAccount`/`ConnectionService`, PSTN bridge, or appointment-calling system. The source requires full Gradle, Docker, model, TURN/network and physical-device acceptance before it can be called working. Calling ordinary mobile/landline numbers through AI still requires carrier/PSTN interconnection and fees; this remains excluded.
+
+### Current PR #3 validation checkpoint
+
+The latest checked run `45319787869` compiled Kotlin and ran 182 tests: 181 passed and one failed in `ProactiveEngineLifecycleTest.detectsRecurringTopicsOnlyFromUserMessagesOnDistinctDays`; lint and debug assembly were skipped. Source inspection found that the suggestion text contained `other apps` while the test explicitly forbids that phrase, although it also requires the `AURA conversations` marker. The working-copy description now says `This insight uses only messages you shared with AURA.`; the test was not weakened. A focused harness produced the expected recurring-topic suggestion, but the full Gradle suite was not rerun. The exact failure assertion was not included in the fetched CI log, so only the deterministic source mismatch is confirmed, not a new passing CI result.
+
+### Next gates
+
+1. Run the failing test and complete unit/lint/debug tasks against the patched source on a machine with the pinned Gradle distribution and Android SDK 36; push only after local inspection.
+2. Obtain a fresh green Actions run on the feature branch. Keep PR #3 open/draft and do not merge until the full diff is reviewed and reconciled with `main`.
+3. Validate `ROLE_DIALER`, incoming/outgoing SIM calls, notification and lock-screen behaviour, hold/resume, audio routes, role revocation, process death and reboot on Vivo 1901/API30; repeat on a newer Android release.
+4. Validate encryption, key invalidation, corrupted history recovery, retention and deletion; verify that no SIM audio/transcript is captured.
+5. Add voice-command approval only through a trusted owner-authorization flow; keep manual UI approval as the default.
+6. Complete end-to-end validation of the implemented Android-app-to-local-AI WebRTC path: local model loading, WSS, coturn relay-only media, language acceptance, audio focus, lifecycle, latency/battery, and caller consent. Do not add PSTN bridging or paid vendors.
+7. If needed as a separate future scope, implement a general human-to-human AURA room relay and Android self-managed `ConnectionService`; neither is included in the current AI endpoint.

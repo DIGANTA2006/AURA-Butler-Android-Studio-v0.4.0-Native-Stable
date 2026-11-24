@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+RUN groupadd --system --gid 10001 aura && useradd --system --uid 10001 --gid aura --home-dir /app aura
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt
+COPY --chown=aura:aura server.py aura_security.py aura_privacy.py aura_asr_quality.py ./
+USER 10001:10001
+
+EXPOSE 8765
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8765", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]

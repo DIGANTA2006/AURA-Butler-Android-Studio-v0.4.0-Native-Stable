@@ -1,0 +1,104 @@
+services:
+  aura-voip:
+    build: .
+    container_name: aura-voip
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AURA_ASR_MODEL_DIR: /models/whisper
+      AURA_PIPER_MODELS_JSON: '{"en":"/models/tts/en.onnx","bn":"/models/tts/bn.onnx","hi":"/models/tts/hi.onnx"}'
+      AURA_OLLAMA_URL: http://ollama:11434
+    volumes:
+      - ./models:/models:ro
+    user: "10001:10001"
+    expose:
+      - "8765"
+    depends_on:
+      - ollama
+    networks:
+      - aura-private
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,noexec,nosuid,nodev,uid=10001,gid=10001,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  ollama:
+    image: ollama/ollama:0.40.17
+    container_name: aura-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    expose:
+      - "11434"
+    networks:
+      - aura-private
+
+  coturn:
+    image: coturn/coturn:4.19.2-r0
+    container_name: aura-coturn
+    restart: unless-stopped
+    command:
+      - -n
+      - --log-file=stdout
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET}
+      - --realm=${TURN_REALM}
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --listening-port=3478
+      - --tls-listening-port=5349
+      - --min-port=49160
+      - --max-port=49200
+      - --no-cli
+      - --no-multicast-peers
+      - --no-loopback-peers
+      - --cert=/certs/fullchain.pem
+      - --pkey=/certs/privkey.pem
+    volumes:
+      - ./certs:/certs:ro
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    networks:
+      aura-private:
+        ipv4_address: 172.30.240.10
+
+  caddy:
+    image: caddy:2.11.9
+    container_name: aura-caddy
+    restart: unless-stopped
+    environment:
+      AURA_DOMAIN: ${AURA_DOMAIN}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - aura-voip
+    networks:
+      - aura-private
+
+networks:
+  aura-private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.240.0/24
+
+volumes:
+  ollama-models:
+  caddy-data:
+  caddy-config:

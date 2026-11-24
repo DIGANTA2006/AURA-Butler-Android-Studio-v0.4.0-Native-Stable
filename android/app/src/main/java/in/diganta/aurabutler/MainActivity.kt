@@ -15,7 +15,6 @@ import androidx.core.content.ContextCompat
 import `in`.diganta.aurabutler.background.WakeWordService
 import `in`.diganta.aurabutler.ui.AuraApp
 import `in`.diganta.aurabutler.model.AppTab
-import `in`.diganta.aurabutler.ui.glass.AuraGlassBackdrop
 import `in`.diganta.aurabutler.ui.theme.AuraTheme
 
 class MainActivity : ComponentActivity() {
@@ -32,9 +31,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             AuraTheme {
-                AuraGlassBackdrop {
-                    AuraApp(viewModel)
-                }
+                AuraApp(viewModel)
             }
         }
         handleAnalyzerIntent(intent)
