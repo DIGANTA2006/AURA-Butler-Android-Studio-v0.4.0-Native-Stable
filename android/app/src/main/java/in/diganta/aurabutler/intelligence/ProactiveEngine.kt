@@ -5,6 +5,7 @@ import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import `in`.diganta.aurabutler.model.ButlerAction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,9 +25,13 @@ import java.util.concurrent.TimeUnit
 class ProactiveEngine(
     private val aiProvider: AiProvider?,
     private val semanticMemory: SemanticMemory,
-    private val settings: ButlerSettings,
-    private val contextProvider: ContextProvider
+    settings: ButlerSettings,
+    private val contextProvider: ContextProvider,
+    private val persistence: ProactiveSuggestionPersistence? = null,
+    private val actionHandler: ActionHandler? = null
 ) {
+    @Volatile
+    private var settings: ButlerSettings = settings
 
     data class ProactiveSuggestion(
         val id: String = UUID.randomUUID().toString(),
@@ -40,7 +45,9 @@ class ProactiveEngine(
         val createdAt: Long = System.currentTimeMillis(),
         val expiresAt: Long = System.currentTimeMillis() + 3600_000, // 1 hour default
         val dismissed: Boolean = false,
-        val accepted: Boolean = false
+        val accepted: Boolean = false,
+        val pendingApprovalAction: ButlerAction? = null,
+        val lastActionError: String? = null
     )
 
     enum class SuggestionType {
@@ -130,7 +137,8 @@ class ProactiveEngine(
         val deviceState: DeviceState,
         val recentMemories: List<SemanticMemory.MemoryEntry>,
         val activePlans: List<String>,
-        val userPreferences: ButlerSettings
+        val userPreferences: ButlerSettings,
+        val recentMessages: List<String> = emptyList()
     )
 
     data class DeviceState(
@@ -150,6 +158,30 @@ class ProactiveEngine(
         val error: String? = null
     )
 
+    data class AgentState(
+        val id: String,
+        val enabled: Boolean,
+        val lastRun: Long?,
+        val nextRun: Long?,
+        val runCount: Int,
+        val successCount: Int,
+        val errorCount: Int
+    )
+
+    data class ActionResult(
+        val completed: Boolean,
+        val detail: String? = null,
+        val pendingApproval: ButlerAction? = null,
+        val error: String? = null
+    )
+
+    interface ActionHandler {
+        suspend fun execute(
+            action: ProactiveAction,
+            context: ConversationContext
+        ): ActionResult
+    }
+
     private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
     private val agents = ConcurrentHashMap<String, BackgroundAgent>()
     @Volatile
@@ -160,7 +192,29 @@ class ProactiveEngine(
     private var running = false
 
     init {
+        persistence?.loadSuggestions()
+            ?.filter { it.expiresAt > System.currentTimeMillis() }
+            ?.forEach { suggestions[it.id] = it }
         registerDefaultAgents()
+        persistence?.loadAgentStates()?.forEach { state ->
+            agents.computeIfPresent(state.id) { _, current ->
+                current.copy(
+                    enabled = state.enabled,
+                    lastRun = state.lastRun,
+                    nextRun = state.nextRun,
+                    runCount = state.runCount.coerceAtLeast(0),
+                    successCount = state.successCount.coerceAtLeast(0),
+                    errorCount = state.errorCount.coerceAtLeast(0)
+                )
+            }
+        }
+    }
+
+    fun updateSettings(updated: ButlerSettings) {
+        settings = updated
+        if (!updated.proactiveSuggestionsEnabled) stop()
+        else if (updated.intelligenceMode == in.diganta.aurabutler.model.IntelligenceMode.ENHANCED ||
+            updated.intelligenceMode == in.diganta.aurabutler.model.IntelligenceMode.AUTONOMOUS) start()
     }
 
     /**
@@ -168,7 +222,7 @@ class ProactiveEngine(
      */
     @Synchronized
     fun start() {
-        if (running) return
+        if (running || !settings.proactiveSuggestionsEnabled) return
         if (scheduler.isShutdown) {
             scheduler = Executors.newScheduledThreadPool(2)
         }
@@ -204,7 +258,10 @@ class ProactiveEngine(
     fun getSuggestions(context: ConversationContext, limit: Int = 5): List<ProactiveSuggestion> {
         val now = System.currentTimeMillis()
         return suggestions.values
-            .filter { !it.dismissed && !it.accepted && it.expiresAt > now }
+            .filter {
+                !it.dismissed && !it.accepted &&
+                    it.pendingApprovalAction == null && it.expiresAt > now
+            }
             .filter { isRelevant(it, context) }
             .sortedByDescending { it.priority.weight * it.confidence }
             .take(limit)
@@ -215,19 +272,103 @@ class ProactiveEngine(
      * Mark a suggestion as dismissed.
      */
     fun dismissSuggestion(id: String) {
-        suggestions[id]?.let { suggestions[id] = it.copy(dismissed = true) }
+        suggestions[id]?.let { existing ->
+            if (existing.pendingApprovalAction == null) {
+                val updated = existing.copy(dismissed = true)
+                suggestions[id] = updated
+                persistence?.saveSuggestion(updated)
+            }
+        }
     }
 
     /**
      * Mark a suggestion as accepted and execute its action.
      */
-    suspend fun acceptSuggestion(id: String, context: ConversationContext): Boolean {
-        val suggestion = suggestions[id] ?: return false
-        val executed = executeAction(suggestion.action, context)
-        if (executed) {
-            suggestions[id] = suggestion.copy(accepted = true)
+    suspend fun acceptSuggestion(id: String, context: ConversationContext): Boolean =
+        acceptSuggestionDetailed(id, context).completed
+
+    suspend fun acceptSuggestionDetailed(
+        id: String,
+        context: ConversationContext
+    ): ActionResult {
+        val suggestion = suggestions[id] ?: return ActionResult(
+            completed = false,
+            error = "The proactive suggestion no longer exists."
+        )
+        if (suggestion.expiresAt <= System.currentTimeMillis()) {
+            dismissSuggestion(id)
+            return ActionResult(completed = false, error = "This suggestion has expired.")
         }
-        return executed
+        val handler = actionHandler ?: return ActionResult(
+            completed = false,
+            error = "No production action handler is configured."
+        )
+        val result = try {
+            handler.execute(suggestion.action, context)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            ActionResult(
+                completed = false,
+                error = (error.message ?: error.javaClass.simpleName).take(500)
+            )
+        }
+
+        val updated = when {
+            result.pendingApproval != null -> suggestion.copy(
+                pendingApprovalAction = result.pendingApproval,
+                lastActionError = null
+            )
+            result.completed -> suggestion.copy(
+                accepted = true,
+                pendingApprovalAction = null,
+                lastActionError = null
+            )
+            else -> suggestion.copy(
+                lastActionError = result.error ?: result.detail ?: "The suggested action did not complete."
+            )
+        }
+        suggestions[id] = updated
+        persistence?.saveSuggestion(updated)
+        return result
+    }
+
+    fun resolveActionApproval(
+        actionId: String,
+        completed: Boolean,
+        detail: String? = null
+    ): Boolean {
+        val suggestion = suggestions.values.firstOrNull {
+            it.pendingApprovalAction?.id == actionId
+        } ?: return false
+        val updated = suggestion.copy(
+            accepted = completed,
+            dismissed = !completed,
+            pendingApprovalAction = null,
+            lastActionError = if (completed) null else {
+                detail?.take(500) ?: "The user declined or the approved action failed."
+            }
+        )
+        suggestions[suggestion.id] = updated
+        persistence?.saveSuggestion(updated)
+        return true
+    }
+
+    fun getSuggestionForAction(actionId: String): ProactiveSuggestion? =
+        suggestions.values.firstOrNull { it.pendingApprovalAction?.id == actionId }
+
+    fun getSuggestion(id: String): ProactiveSuggestion? = suggestions[id]
+
+    fun getAgentStates(): List<AgentState> = agents.values.map { agent ->
+        AgentState(
+            id = agent.id,
+            enabled = agent.enabled,
+            lastRun = agent.lastRun,
+            nextRun = agent.nextRun,
+            runCount = agent.runCount,
+            successCount = agent.successCount,
+            errorCount = agent.errorCount
+        )
     }
 
     /**
@@ -235,7 +376,22 @@ class ProactiveEngine(
      */
     fun registerAgent(agent: BackgroundAgent) {
         agents[agent.id] = agent
+        persistAgent(agent)
         if (running && agent.enabled) scheduleAgent(agent)
+    }
+
+    private fun persistAgent(agent: BackgroundAgent) {
+        persistence?.saveAgentState(
+            AgentState(
+                id = agent.id,
+                enabled = agent.enabled,
+                lastRun = agent.lastRun,
+                nextRun = agent.nextRun,
+                runCount = agent.runCount,
+                successCount = agent.successCount,
+                errorCount = agent.errorCount
+            )
+        )
     }
 
     /**
@@ -248,6 +404,7 @@ class ProactiveEngine(
     private fun registerDefaultAgents() {
         // Daily briefing agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-daily-briefing-v1",
             name = "Daily Briefing",
             description = "Generates a morning summary of schedule, weather, and priorities",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
@@ -263,6 +420,7 @@ class ProactiveEngine(
 
         // Memory consolidation agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-memory-consolidation-v1",
             name = "Memory Consolidation",
             description = "Consolidates memories, extracts patterns, applies forgetting curve",
             schedule = AgentSchedule.DAILY,
@@ -278,6 +436,7 @@ class ProactiveEngine(
 
         // Battery optimization agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-battery-optimization-v1",
             name = "Battery Optimization",
             description = "Suggests power-saving actions when battery is low",
             schedule = AgentSchedule.HOURLY,
@@ -304,6 +463,7 @@ class ProactiveEngine(
 
         // Storage cleanup agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-storage-monitor-v1",
             name = "Storage Monitor",
             description = "Alerts when storage is running low",
             schedule = AgentSchedule.DAILY,
@@ -330,6 +490,7 @@ class ProactiveEngine(
 
         // Habit learning agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-habit-learning-v1",
             name = "Habit Learning",
             description = "Detects recurring patterns and suggests automations",
             schedule = AgentSchedule.WEEKLY,
@@ -345,6 +506,7 @@ class ProactiveEngine(
 
         // Research follow-up agent
         registerAgent(BackgroundAgent(
+            id = "aura-agent-research-follow-up-v1",
             name = "Research Follow-up",
             description = "Checks for updates on previous research topics",
             schedule = AgentSchedule.DAILY,
@@ -366,23 +528,92 @@ class ProactiveEngine(
     }
 
     private fun scheduleAgent(agent: BackgroundAgent) {
-        val delay = calculateNextRun(agent.schedule)
+        val now = System.currentTimeMillis()
+        val nextRun = agent.nextRun?.takeIf { it > now }
+            ?: now + calculateNextRun(agent.schedule)
+        val scheduled = agent.copy(nextRun = nextRun)
+        agents[agent.id] = scheduled
+        persistAgent(scheduled)
+        val delay = (nextRun - now).coerceAtLeast(0L)
         scheduler.schedule({
             if (running && agents[agent.id]?.enabled == true) {
-                runAgent(agent)
+                runAgent(scheduled)
             }
         }, delay, TimeUnit.MILLISECONDS)
     }
 
     private fun calculateNextRun(schedule: AgentSchedule): Long {
-        val now = System.currentTimeMillis()
         return when (schedule) {
-            AgentSchedule.HOURLY -> 3_600_000 // 1 hour
-            AgentSchedule.DAILY -> 24 * 3_600_000 // 24 hours
-            AgentSchedule.WEEKLY -> 7 * 24 * 3_600_000 // 1 week
-            is AgentSchedule.ON_EVENT -> 3_600_000 // Check hourly for events
-            is AgentSchedule.CRON -> 3_600_000 // Cron parsing remains a separate scheduling enhancement
+            AgentSchedule.HOURLY -> 3_600_000L
+            AgentSchedule.DAILY -> 24L * 3_600_000L
+            AgentSchedule.WEEKLY -> 7L * 24L * 3_600_000L
+            is AgentSchedule.ON_EVENT -> 3_600_000L
+            is AgentSchedule.CRON -> nextCronTime(schedule.expression)
+                ?.minus(System.currentTimeMillis())
+                ?.coerceAtLeast(60_000L)
+                ?: 3_600_000L
         }
+    }
+
+    private fun nextCronTime(expression: String): Long? {
+        val fields = expression.trim().split(Regex("\\s+"))
+        if (fields.size != 5) return null
+        val minute = parseCronField(fields[0], 0, 59) ?: return null
+        val hour = parseCronField(fields[1], 0, 23) ?: return null
+        val day = parseCronField(fields[2], 1, 31) ?: return null
+        val month = parseCronField(fields[3], 1, 12) ?: return null
+        val weekday = parseCronField(fields[4], 0, 7) ?: return null
+
+        var candidate = java.time.ZonedDateTime.now()
+            .withSecond(0)
+            .withNano(0)
+            .plusMinutes(1)
+        val maximum = candidate.plusYears(1)
+        while (candidate.isBefore(maximum)) {
+            val javaDay = candidate.dayOfWeek.value % 7
+            val cronDay = candidate.dayOfMonth
+            val cronWeekday = javaDay
+            if (
+                candidate.minute in minute &&
+                candidate.hour in hour &&
+                cronDay in day &&
+                candidate.monthValue in month &&
+                (cronWeekday in weekday || (cronWeekday == 0 && 7 in weekday))
+            ) {
+                return candidate.toInstant().toEpochMilli()
+            }
+            candidate = candidate.plusMinutes(1)
+        }
+        return null
+    }
+
+    private fun parseCronField(field: String, min: Int, max: Int): Set<Int>? {
+        val values = mutableSetOf<Int>()
+        field.split(',').forEach { part ->
+            val pieces = part.split('/')
+            if (pieces.size > 2) return null
+            val step = pieces.getOrNull(1)?.toIntOrNull() ?: 1
+            if (step !in 1..(max - min + 1)) return null
+            val base = pieces[0]
+            val range = when {
+                base == "*" -> min..max
+                base.contains('-') -> {
+                    val endpoints = base.split('-')
+                    if (endpoints.size != 2) return null
+                    val start = endpoints[0].toIntOrNull() ?: return null
+                    val end = endpoints[1].toIntOrNull() ?: return null
+                    if (start !in min..max || end !in start..max) return null
+                    start..end
+                }
+                else -> {
+                    val value = base.toIntOrNull() ?: return null
+                    if (value !in min..max) return null
+                    value..value
+                }
+            }
+            range.filterIndexed { index, _ -> index % step == 0 }.forEach(values::add)
+        }
+        return values.takeIf { it.isNotEmpty() }
     }
 
     private fun runAgent(agent: BackgroundAgent) {
@@ -403,12 +634,14 @@ class ProactiveEngine(
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = successAgent
+                persistAgent(successAgent)
 
-                // Add generated suggestions only after successful agent execution.
-                result.suggestions.forEach { suggestions[it.id] = it }
+                if (result.success) {
+                    result.suggestions.forEach(::upsertSuggestion)
+                }
 
-                // The current engine has no action executor. Keep auto-execution
-                // disabled here; suggestions must never be reported as performed.
+                // Agent-generated actions are never executed automatically.
+                // The user must review a suggestion and explicitly accept it.
                 if (running && successAgent.enabled) scheduleAgent(successAgent)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -418,6 +651,7 @@ class ProactiveEngine(
                     nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
                 )
                 agents[agent.id] = errorAgent
+                persistAgent(errorAgent)
                 if (running && errorAgent.enabled) scheduleAgent(errorAgent)
             }
         }
@@ -437,7 +671,9 @@ class ProactiveEngine(
             deviceState = contextProvider.getDeviceState(),
             recentMemories = memoryResult.entries.map { it.entry },
             activePlans = emptyList(),
-            userPreferences = settings
+            userPreferences = settings,
+            recentMessages = conversationContext.recentMessages.takeLast(12)
+                .map { it.text.take(1_000) }
         )
     }
 
@@ -460,14 +696,40 @@ class ProactiveEngine(
         // Filter and store
         val now = System.currentTimeMillis()
         for (suggestion in allSuggestions) {
-            if (suggestion.confidence >= 0.4 && suggestion.expiresAt > now) {
-                suggestions[suggestion.id] = suggestion
+            if (
+                suggestion.confidence >= MIN_SUGGESTION_CONFIDENCE &&
+                suggestion.expiresAt > now &&
+                suggestion.title.isNotBlank() &&
+                suggestion.description.isNotBlank() &&
+                !SecretRedactor.containsLikelySecret(suggestion.title + " " + suggestion.description)
+            ) {
+                upsertSuggestion(suggestion)
             }
         }
-        
-        // Clean expired
+
         val expired = suggestions.values.filter { it.expiresAt <= now }.map { it.id }
-        expired.forEach { suggestions.remove(it) }
+        expired.forEach { id ->
+            suggestions.remove(id)
+            persistence?.deleteSuggestion(id)
+        }
+    }
+
+    private fun upsertSuggestion(generated: ProactiveSuggestion) {
+        val stableId = UUID.nameUUIDFromBytes(
+            ("aura-proactive-v1:" + generated.type.name + ":" +
+                generated.title.trim().lowercase(java.util.Locale.ROOT))
+                .toByteArray(Charsets.UTF_8)
+        ).toString()
+        val old = suggestions[stableId]
+        val updated = generated.copy(
+            id = stableId,
+            dismissed = old?.dismissed ?: false,
+            accepted = old?.accepted ?: false,
+            pendingApprovalAction = old?.pendingApprovalAction,
+            lastActionError = old?.lastActionError
+        )
+        suggestions[stableId] = updated
+        persistence?.saveSuggestion(updated)
     }
 
     private fun generateTimeBasedSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
@@ -557,9 +819,35 @@ class ProactiveEngine(
     }
 
     private fun generateContextualSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
-        // Would analyze recent conversation context
-        // For now, return empty - would integrate with conversation history
-        return emptyList()
+        if (ctx.recentMessages.isEmpty()) return emptyList()
+        val recentUserText = ctx.recentMessages.takeLast(8)
+            .filter { !SecretRedactor.containsSensitive(it) }
+            .map(SecretRedactor::redact)
+        if (recentUserText.isEmpty()) return emptyList()
+
+        val reminders = recentUserText.filter { message ->
+            message.containsAny(
+                "remind me", "don't forget", "need to finish",
+                "i should", "follow up", "deadline", "due tomorrow",
+                "tomorrow i will", "next week"
+            )
+        }
+        val latest = reminders.lastOrNull() ?: return emptyList()
+        val subject = latest.take(160).trim()
+        return listOf(
+            ProactiveSuggestion(
+                type = SuggestionType.FOLLOW_UP,
+                title = "Follow-up from your conversation",
+                description = "You mentioned: \"$subject\". Would you like me to turn this into a reminder or a task plan?",
+                action = ProactiveAction(
+                    type = ActionType.ASK_QUESTION,
+                    payload = mapOf("question" to "Create a reminder or task plan for this follow-up?")
+                ),
+                confidence = 0.68,
+                priority = Priority.MEDIUM,
+                context = SuggestionContext(trigger = Trigger.CONVERSATION_CONTEXT)
+            )
+        )
     }
 
     private fun generateMemoryPatternSuggestions(ctx: AgentContext): List<ProactiveSuggestion> {
@@ -663,21 +951,29 @@ class ProactiveEngine(
             else -> {}
         }
         
-        // Check if user prefers proactive suggestions
-        return settings.proactiveSuggestionsEnabled
+        return context.settings.proactiveSuggestionsEnabled
     }
 
     private suspend fun executeAction(
         action: ProactiveAction,
         context: ConversationContext
     ): Boolean {
-        // Suggestions are metadata only until a reviewed action executor is
-        // injected. Never mark a suggestion accepted after a no-op.
-        return false
+        val handler = actionHandler ?: return false
+        val result = handler.execute(action, context)
+        return result.completed
     }
 
     interface ContextProvider {
         fun getCurrentContext(): ConversationContext
         fun getDeviceState(): DeviceState
     }
+}
+
+
+interface ProactiveSuggestionPersistence {
+    fun loadSuggestions(): List<ProactiveEngine.ProactiveSuggestion>
+    fun saveSuggestion(suggestion: ProactiveEngine.ProactiveSuggestion)
+    fun deleteSuggestion(id: String)
+    fun loadAgentStates(): List<ProactiveEngine.AgentState>
+    fun saveAgentState(state: ProactiveEngine.AgentState)
 }
