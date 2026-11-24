@@ -416,15 +416,25 @@ class ProactiveEngine(
      */
     suspend fun runDueAgentsNow(): Int {
         if (!settings.proactiveSuggestionsEnabled) return 0
-        val now = System.currentTimeMillis()
-        val due = agents.values
-            .filter { it.enabled && (it.nextRun == null || it.nextRun <= now) }
-            .sortedBy { it.nextRun ?: 0L }
-        due.forEach { agent ->
-            currentCoroutineContext().ensureActive()
-            runAgent(agent)
+        val due = synchronized(this) {
+            if (running) return 0
+            running = true
+            val now = System.currentTimeMillis()
+            agents.values
+                .filter { it.enabled && (it.nextRun == null || it.nextRun <= now) }
+                .sortedBy { it.nextRun ?: 0L }
         }
-        return due.size
+        var completed = 0
+        try {
+            due.forEach { agent ->
+                currentCoroutineContext().ensureActive()
+                runAgent(agent)
+                completed++
+            }
+            return completed
+        } finally {
+            synchronized(this) { running = false }
+        }
     }
 
     fun nextAgentRunAt(): Long? = agents.values
