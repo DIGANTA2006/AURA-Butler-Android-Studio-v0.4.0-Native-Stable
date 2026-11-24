@@ -22,6 +22,7 @@ import `in`.diganta.aurabutler.data.OpenAiCompatibleProvider
 import `in`.diganta.aurabutler.data.PrivateVisionProvider
 import `in`.diganta.aurabutler.data.PrivateDocumentProvider
 import `in`.diganta.aurabutler.data.SecureStore
+import `in`.diganta.aurabutler.memory.EmbeddingModelFiles
 import `in`.diganta.aurabutler.voice.OwnerVoiceGuard
 import `in`.diganta.aurabutler.domain.ActionExecutor
 import `in`.diganta.aurabutler.domain.ButlerPersona
@@ -1033,6 +1034,14 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             butlerBanterLevel = settings.butlerBanterLevel.coerceIn(0, 2)
         )
         store.saveSettings(normalized)
+        // Keep model provisioning in sync with a live settings change.
+        // WorkManager applies the same unmetered-network and battery constraints
+        // used during startup; no model download or hashing runs on the UI thread.
+        if (normalized.semanticMemoryEnabled) {
+            EmbeddingModelFiles.enqueueIfMissing(getApplication())
+        } else {
+            EmbeddingModelFiles.cancelPendingDownload(getApplication())
+        }
         _uiState.update {
             it.copy(
                 settings = normalized,
