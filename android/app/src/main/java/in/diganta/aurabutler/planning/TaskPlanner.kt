@@ -651,27 +651,47 @@ class TaskPlanner(
 }
 
 /**
- * In-memory plan repository with bounded version history.
- * Durable persistence and process-death recovery are not implemented yet.
+ * Versioned, encrypted-capable persistence contract for plans and checkpoints.
  */
-class PlanStore {
+data class PersistedPlanState(
+    val current: TaskPlanner.Plan,
+    val history: List<TaskPlanner.Plan>
+)
+
+interface PlanStorePersistence {
+    fun loadAll(): List<PersistedPlanState>
+    fun save(state: PersistedPlanState)
+    fun delete(planId: String)
+}
+
+/** Thread-safe bounded repository with durable checkpoint/version recovery. */
+class PlanStore(
+    private val persistence: PlanStorePersistence? = null
+) {
     private val plans = ConcurrentHashMap<String, TaskPlanner.Plan>()
     private val versions = ConcurrentHashMap<String, MutableList<TaskPlanner.Plan>>()
 
+    init {
+        persistence?.loadAll()?.forEach { state ->
+            plans[state.current.id] = state.current
+            versions[state.current.id] = state.history
+                .takeLast(MAX_HISTORY_PER_PLAN)
+                .toMutableList()
+        }
+    }
+
     /**
-     * Serializes compound map/history mutations. ConcurrentHashMap protects
-     * individual entries, not the mutable version list stored inside an entry.
+     * Persist the new checkpoint before publishing it in memory. An I/O or
+     * encryption failure is visible to the caller and cannot look like a save.
      */
     @Synchronized
     fun save(plan: TaskPlanner.Plan) {
         val updated = plan.copy(updatedAt = System.currentTimeMillis())
+        val history = (versions[plan.id].orEmpty() + updated)
+            .takeLast(MAX_HISTORY_PER_PLAN)
+        persistence?.save(PersistedPlanState(updated, history))
         plans[plan.id] = updated
-
-        val history = versions.getOrPut(plan.id) { mutableListOf() }
-        history += updated
-        while (history.size > MAX_HISTORY_PER_PLAN) {
-            history.removeAt(0)
-        }
+        versions[plan.id] = history.toMutableList()
     }
 
     @Synchronized
@@ -686,6 +706,7 @@ class PlanStore {
 
     @Synchronized
     fun delete(id: String) {
+        persistence?.delete(id)
         plans.remove(id)
         versions.remove(id)
     }
