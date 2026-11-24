@@ -30,6 +30,7 @@ import `in`.diganta.aurabutler.domain.ExecutionResult
 import `in`.diganta.aurabutler.domain.LocalButlerEngine
 import `in`.diganta.aurabutler.domain.ProductionButlerEngine
 import `in`.diganta.aurabutler.planning.AndroidPlanningRuntime
+import `in`.diganta.aurabutler.planning.TaskPlanner
 import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
 import `in`.diganta.aurabutler.intelligence.AndroidProactiveActionHandler
 import `in`.diganta.aurabutler.intelligence.AndroidProactiveContextProvider
@@ -1335,7 +1336,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     private fun planningReply(
         planId: String,
         title: String,
-        result: in.diganta.aurabutler.planning.TaskPlanner.ExecutionResult
+        result: TaskPlanner.ExecutionResult
     ): ButlerReply {
         val approval = result.pendingApproval
         val message = buildString {
