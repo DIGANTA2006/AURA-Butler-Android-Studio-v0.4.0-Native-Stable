@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 class ProactiveEngine(
     private val aiProvider: AiProvider?,
-    private val semanticMemory: SemanticMemory,
+    private val semanticMemory: SemanticMemory?,
     settings: ButlerSettings,
     private val contextProvider: ContextProvider,
     private val persistence: ProactiveSuggestionPersistence? = null,
@@ -425,7 +425,12 @@ class ProactiveEngine(
             description = "Consolidates memories, extracts patterns, applies forgetting curve",
             schedule = AgentSchedule.DAILY,
             task = { _ ->
-                val result = semanticMemory.consolidate()
+                val memoryEngine = semanticMemory ?: return@AgentTask AgentResult(
+                    success = false,
+                    output = "Memory consolidation is waiting for the verified ONNX embedding model.",
+                    error = "The on-device semantic model is not installed."
+                )
+                val result = memoryEngine.consolidate()
                 AgentResult(
                     success = result.errors.isEmpty(),
                     output = "Memory consolidation: merged ${result.mergedCount}, patterns ${result.patternsFound}, concepts ${result.conceptsCreated}, decayed ${result.decayedCount}.",
@@ -666,7 +671,7 @@ class ProactiveEngine(
 
     private suspend fun buildAgentContext(): AgentContext {
         val conversationContext = contextProvider.getCurrentContext()
-        val memoryResult = semanticMemory.recall(
+        val memoryResult = semanticMemory?.recall(
             query = "recent",
             context = conversationContext,
             options = SemanticMemory.RecallOptions(
@@ -676,7 +681,7 @@ class ProactiveEngine(
         )
         return AgentContext(
             deviceState = contextProvider.getDeviceState(),
-            recentMemories = memoryResult.entries.map { it.entry },
+            recentMemories = memoryResult?.entries?.map { it.entry }.orEmpty(),
             activePlans = emptyList(),
             userPreferences = settings,
             recentMessages = conversationContext.recentMessages.takeLast(12)
