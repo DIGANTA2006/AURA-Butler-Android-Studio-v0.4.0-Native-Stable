@@ -52,13 +52,48 @@ object EmbeddingModelFiles {
 
     fun isInstalled(context: Context): Boolean {
         val marker = completionMarker(context)
-        return marker.isFile &&
-            modelFile(context).isFile &&
-            modelFile(context).length() > OnnxSentenceEmbeddingProvider.MIN_MODEL_BYTES &&
-            vocabularyFile(context).isFile &&
-            vocabularyFile(context).length() in
-                OnnxSentenceEmbeddingProvider.MIN_VOCAB_BYTES..
+        val model = modelFile(context)
+        val vocabulary = vocabularyFile(context)
+        if (
+            !marker.isFile ||
+            !model.isFile ||
+            model.length() <= OnnxSentenceEmbeddingProvider.MIN_MODEL_BYTES ||
+            !vocabulary.isFile ||
+            vocabulary.length() !in OnnxSentenceEmbeddingProvider.MIN_VOCAB_BYTES..
                 OnnxSentenceEmbeddingProvider.MAX_VOCAB_BYTES
+        ) return false
+
+        val manifest = runCatching {
+            marker.readLines(Charsets.UTF_8)
+                .mapNotNull { line ->
+                    val separator = line.indexOf('=')
+                    if (separator <= 0) null
+                    else line.substring(0, separator).trim() to
+                        line.substring(separator + 1).trim()
+                }
+                .toMap()
+        }.getOrDefault(emptyMap())
+
+        return manifest["revision"] == MODEL_REVISION &&
+            manifest["model_sha256"] == MODEL_SHA256 &&
+            manifest["vocab_sha256"] == VOCAB_SHA256 &&
+            sha256(model) == MODEL_SHA256 &&
+            sha256(vocabulary) == VOCAB_SHA256
+    }
+
+    private fun sha256(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(32 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") {
+            "%02x".format(java.util.Locale.ROOT, it.toInt() and 0xff)
+        }
     }
 
     fun enqueueIfMissing(context: Context) {
