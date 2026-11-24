@@ -45,6 +45,7 @@ class ProactiveAgentWorker(
         var proactivePersistence: EncryptedProactivePersistence? = null
         var semanticMemory: SemanticMemory? = null
         var engine: ProactiveEngine? = null
+        var planningRuntime: AndroidPlanningRuntime? = null
 
         try {
             val memories = secureStore.loadMemories()
@@ -73,7 +74,7 @@ class ProactiveAgentWorker(
                 )
             }
 
-            val planningRuntime = AndroidPlanningRuntime(applicationContext)
+            planningRuntime = AndroidPlanningRuntime(applicationContext)
             proactivePersistence = EncryptedProactivePersistence(applicationContext)
             engine = ProactiveEngine(
                 aiProvider = HybridAiProvider(),
@@ -83,7 +84,7 @@ class ProactiveAgentWorker(
                 persistence = proactivePersistence,
                 actionHandler = AndroidProactiveActionHandler(
                     applicationContext,
-                    planningRuntime
+                    requireNotNull(planningRuntime)
                 )
             )
 
@@ -99,6 +100,7 @@ class ProactiveAgentWorker(
             embeddingProvider?.close()
             semanticPersistence?.close()
             proactivePersistence?.close()
+            planningRuntime?.close()
         }
     }
 
