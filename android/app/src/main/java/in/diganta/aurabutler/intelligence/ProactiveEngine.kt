@@ -414,6 +414,18 @@ class ProactiveEngine(
     fun getSuggestionForAction(actionId: String): ProactiveSuggestion? =
         suggestions.values.firstOrNull { it.pendingApprovalAction?.id == actionId }
 
+    fun getPendingApprovalActions(): List<ButlerAction> {
+        val now = System.currentTimeMillis()
+        return suggestions.values
+            .mapNotNull { suggestion ->
+                suggestion.pendingApprovalAction
+                    ?.takeIf { !it.isExpired() && suggestion.expiresAt > now }
+            }
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAtEpochMs }
+            .take(MAX_PENDING_APPROVAL_ACTIONS)
+    }
+
     fun getSuggestion(id: String): ProactiveSuggestion? = suggestions[id]
 
     fun getAgentStates(): List<AgentState> = agents.values.map { agent ->
@@ -1287,3 +1299,4 @@ private const val MAX_HABIT_SUGGESTIONS = 2
 private const val MAX_RESEARCH_FOLLOW_UPS = 2
 private const val MAX_RESEARCH_GOAL_CHARS = 2_000
 private const val SUGGESTION_TTL_MS = 24L * 60 * 60 * 1_000
+private const val MAX_PENDING_APPROVAL_ACTIONS = 12
