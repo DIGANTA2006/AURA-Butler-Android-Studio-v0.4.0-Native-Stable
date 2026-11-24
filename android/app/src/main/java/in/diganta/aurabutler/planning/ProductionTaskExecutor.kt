@@ -10,6 +10,9 @@ import `in`.diganta.aurabutler.model.ButlerAction
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import kotlinx.coroutines.CancellationException
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.Locale
 import java.util.UUID
 
@@ -26,7 +29,8 @@ class ProductionTaskExecutor(
         val success: Boolean,
         val output: String? = null,
         val error: String? = null,
-        val pendingApproval: ButlerAction? = null
+        val pendingApproval: ButlerAction? = null,
+        val retryable: Boolean = false
     )
 
     suspend fun execute(
@@ -46,7 +50,13 @@ class ProductionTaskExecutor(
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Exception) {
-        Outcome(false, error = (error.message ?: error.javaClass.simpleName).take(MAX_ERROR_CHARS))
+        Outcome(
+            success = false,
+            error = (error.message ?: error.javaClass.simpleName).take(MAX_ERROR_CHARS),
+            retryable = error is IOException ||
+                error is SocketTimeoutException ||
+                error is UnknownHostException
+        )
     }
 
     private suspend fun research(task: TaskPlanner.TaskNode, context: ConversationContext): Outcome {
@@ -110,6 +120,7 @@ class ProductionTaskExecutor(
             .mapValues { (_, value) -> value.toString().take(MAX_ACTION_VALUE_CHARS) }
             .filterValues(String::isNotBlank)
             .toMutableMap()
+        normalizeActionArguments(kind, payload)
         if (payload.values.any { SecretRedactor.containsLikelySecret(it) }) {
             return Outcome(false, error = "AURA blocked an action proposal containing a likely credential or secret.")
         }
@@ -206,6 +217,49 @@ class ProductionTaskExecutor(
             else -> return Outcome(false, error = "Unsupported decision operator: " + operator)
         }
         return Outcome(true, output = if (value) "DECISION_TRUE" else "DECISION_FALSE")
+    }
+
+    private fun normalizeActionArguments(
+        kind: ActionKind,
+        payload: MutableMap<String, String>
+    ) {
+        when (kind) {
+            ActionKind.SET_TIMER -> {
+                if ("seconds" !in payload) {
+                    payload["seconds"] = payload["duration_seconds"].orEmpty()
+                }
+            }
+            ActionKind.REMINDER -> {
+                if ("triggerAtIso" !in payload) {
+                    payload["triggerAtIso"] = payload["time"].orEmpty()
+                }
+                if ("title" !in payload) {
+                    payload["title"] = payload["message"].orEmpty()
+                }
+            }
+            ActionKind.OPEN_SYSTEM_SETTING -> {
+                if ("setting" !in payload) payload["setting"] = payload["name"].orEmpty()
+            }
+            ActionKind.MAP_ROUTE -> {
+                if ("address" !in payload && "query" !in payload) {
+                    payload["address"] = payload["destination"].orEmpty()
+                }
+            }
+            ActionKind.DRAFT_MESSAGE -> {
+                if ("phone" !in payload) payload["phone"] = payload["recipient"].orEmpty()
+                if ("body" !in payload) payload["body"] = payload["message"].orEmpty()
+            }
+            ActionKind.SHARE_TEXT -> {
+                if ("body" !in payload) payload["body"] = payload["text"].orEmpty()
+            }
+            ActionKind.SYSTEM_BRIGHTNESS -> {
+                if ("level" !in payload) payload["level"] = payload["percent"].orEmpty()
+            }
+            ActionKind.FLASHLIGHT -> {
+                if ("enabled" !in payload) payload["enabled"] = payload["state"].orEmpty()
+            }
+            else -> Unit
+        }
     }
 
     private suspend fun reasoningOutcome(prompt: String, context: ConversationContext, label: String): Outcome {
