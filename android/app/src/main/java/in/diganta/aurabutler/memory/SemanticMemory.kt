@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.Closeable
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -23,7 +24,12 @@ class SemanticMemory(
     private val aiProvider: AiProvider?,
     private val embeddingProvider: EmbeddingProvider,
     private val memoryStore: MemoryStore
-) {
+) : Closeable {
+
+    override fun close() {
+        memoryStore.close()
+        (embeddingProvider as? Closeable)?.close()
+    }
 
     data class MemoryEntry(
         val id: String = UUID.randomUUID().toString(),
@@ -1016,6 +1022,10 @@ class MemoryStore(
 
     @Synchronized
     fun size(): Int = memories.size
+
+    fun close() {
+        (persistence as? Closeable)?.close()
+    }
 
     private fun touch(id: String) {
         if (accessSequence == Long.MAX_VALUE) {
