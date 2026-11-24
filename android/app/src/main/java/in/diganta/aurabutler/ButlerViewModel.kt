@@ -29,11 +29,14 @@ import `in`.diganta.aurabutler.domain.DirectActionPolicy
 import `in`.diganta.aurabutler.domain.ExecutionResult
 import `in`.diganta.aurabutler.domain.LocalButlerEngine
 import `in`.diganta.aurabutler.domain.ProductionButlerEngine
+import `in`.diganta.aurabutler.planning.AndroidPlanningRuntime
+import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ActionHistoryItem
 import `in`.diganta.aurabutler.model.AppTab
 import `in`.diganta.aurabutler.model.AuraUiState
 import `in`.diganta.aurabutler.model.ButlerAction
+import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ChatMessage
 import `in`.diganta.aurabutler.model.ConversationContext
@@ -80,6 +83,12 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     private val privateVisionAnalyzer = PrivateVisionProvider()
     private val privateDocumentAnalyzer = PrivateDocumentProvider()
     private val geminiAnalyzer = GeminiAnalyzerProvider()
+
+    // Access this lazy property only inside Dispatchers.IO: its constructor
+    // restores encrypted plan checkpoints from SQLite.
+    private val planningRuntime by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        AndroidPlanningRuntime(getApplication())
+    }
 
     private val initialState = AuraUiState(
         messages = store.loadMessages().ifEmpty { AuraUiState().messages },
@@ -148,25 +157,33 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             try {
-                val reply = butler.chat(
-                    message = text.trim(),
-                    context = ConversationContext(
-                        recentMessages = before.messages.takeLast(16),
-                        memories = before.memories,
-                        settings = before.settings
-                    ),
-                    onPartial = { delta ->
-                        if (delta.isNotBlank()) {
-                            _uiState.update { current ->
-                                current.copy(
-                                    streamingPreview = (
-                                        current.streamingPreview + delta
-                                    ).takeLast(12_000)
-                                )
+                val requestContext = ConversationContext(
+                    recentMessages = before.messages.takeLast(16),
+                    memories = before.memories,
+                    settings = before.settings
+                )
+                val planCommand = parsePlanningCommand(text.trim())
+                val reply = if (planCommand != null) {
+                    withContext(Dispatchers.IO) {
+                        executePlanningCommand(planCommand, requestContext)
+                    }
+                } else {
+                    butler.chat(
+                        message = text.trim(),
+                        context = requestContext,
+                        onPartial = { delta ->
+                            if (delta.isNotBlank()) {
+                                _uiState.update { current ->
+                                    current.copy(
+                                        streamingPreview = (
+                                            current.streamingPreview + delta
+                                        ).takeLast(12_000)
+                                    )
+                                }
                             }
                         }
-                    }
-                )
+                    )
+                }
                 VoiceTimingDiagnostics.noteAiLatency(
                     getApplication(),
                     reply.latencyMs
@@ -342,6 +359,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     mapOf("kind" to action.kind.name, "title" to action.title)
                 )
             }
+            resumePlannerAfterApproval(
+                action,
+                approved = false,
+                detail = "Approval expired. The action was not executed."
+            )
             return
         }
 
@@ -359,6 +381,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     mapOf("kind" to action.kind.name, "title" to action.title)
                 )
             }
+            resumePlannerAfterApproval(
+                action,
+                approved = false,
+                detail = "The local capability policy denied the action."
+            )
             return
         }
 
@@ -429,7 +456,15 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                resumePlannerAfterApproval(action, approved = false, detail = result.reason)
             }
+        }
+        if (resultIsSuccessForPlan(action)) {
+            resumePlannerAfterApproval(
+                action,
+                approved = true,
+                detail = "AURA ActionExecutor completed: " + action.title
+            )
         }
     }
 
@@ -800,6 +835,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 mapOf("kind" to action.kind.name, "title" to action.title)
             )
         }
+        resumePlannerAfterApproval(
+            action,
+            approved = false,
+            detail = "The user declined the proposed action."
+        )
     }
 
     fun removeMemory(item: MemoryItem) {
@@ -1007,6 +1047,186 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun consumeTransientMessage() {
         _uiState.update { it.copy(transientMessage = null) }
+    }
+
+    private sealed interface PlanningCommand {
+        data class Create(val goal: String) : PlanningCommand
+        data class Execute(val goal: String) : PlanningCommand
+        data class Resume(val planId: String) : PlanningCommand
+    }
+
+    private fun parsePlanningCommand(message: String): PlanningCommand? {
+        val normalized = message.trim()
+        val patterns = listOf(
+            "plan and execute:" to { value: String -> PlanningCommand.Execute(value) },
+            "create and execute plan:" to { value: String -> PlanningCommand.Execute(value) },
+            "create plan:" to { value: String -> PlanningCommand.Create(value) },
+            "plan:" to { value: String -> PlanningCommand.Create(value) }
+        )
+        patterns.firstOrNull { (prefix, _) ->
+            normalized.startsWith(prefix, ignoreCase = true)
+        }?.let { (prefix, factory) ->
+            val value = normalized.substring(prefix.length).trim()
+            return value.takeIf(String::isNotBlank)?.let(factory)
+        }
+
+        val resumePrefix = "resume plan:"
+        if (normalized.startsWith(resumePrefix, ignoreCase = true)) {
+            val id = normalized.substring(resumePrefix.length).trim()
+            return id.takeIf { it.matches(Regex("[A-Za-z0-9._-]{8,100}")) }
+                ?.let(PlanningCommand::Resume)
+        }
+        return null
+    }
+
+    private suspend fun executePlanningCommand(
+        command: PlanningCommand,
+        context: ConversationContext
+    ): ButlerReply {
+        val planner = planningRuntime.planner
+        return when (command) {
+            is PlanningCommand.Create -> {
+                val plan = planner.createPlanFromGoal(command.goal, context)
+                ButlerReply(
+                    assistantMessage = "Created durable plan: ${plan.title}\n" +
+                        "Plan ID: ${plan.id}\n" +
+                        "Tasks: ${plan.tasks.size}\n" +
+                        "Nothing has been executed. Use 'plan and execute: <goal>' to start it.",
+                    speechText = "Your plan has been created. Nothing has been executed yet.",
+                    pendingActions = emptyList(),
+                    memoryWrites = emptyList(),
+                    provider = "local-planner",
+                    intent = "plan_created"
+                )
+            }
+            is PlanningCommand.Execute -> {
+                val plan = planner.createPlanFromGoal(command.goal, context)
+                val result = planner.executePlan(plan.id, context)
+                planningReply(plan.id, plan.title, result)
+            }
+            is PlanningCommand.Resume -> {
+                val plan = planner.getPlan(command.planId)
+                    ?: return ButlerReply(
+                        assistantMessage = "I couldn't find plan ${command.planId}.",
+                        speechText = "I couldn't find that plan.",
+                        pendingActions = emptyList(),
+                        memoryWrites = emptyList(),
+                        provider = "local-planner",
+                        intent = "plan_not_found"
+                    )
+                val result = planner.executePlan(plan.id, context)
+                planningReply(plan.id, plan.title, result)
+            }
+        }
+    }
+
+    private fun planningReply(
+        planId: String,
+        title: String,
+        result: in.diganta.aurabutler.planning.TaskPlanner.ExecutionResult
+    ): ButlerReply {
+        val approval = result.pendingApproval
+        val message = buildString {
+            append("Plan: ").append(title).append("\\n")
+            append("Plan ID: ").append(planId).append("\\n")
+            append("Completed tasks: ").append(result.completedTasks)
+                .append(" | Failed tasks: ").append(result.failedTasks).append("\\n")
+            if (approval != null) {
+                append("Paused for your approval: ").append(approval.title)
+                    .append(". Review the approval card below.")
+            } else {
+                append(result.finalOutput ?: result.errorSummary ?: "The plan has no further work.")
+            }
+        }
+        return ButlerReply(
+            assistantMessage = message,
+            speechText = if (approval != null) {
+                "The plan is paused and waiting for your approval."
+            } else {
+                result.finalOutput?.take(2_000) ?: "The plan run has finished."
+            },
+            pendingActions = listOfNotNull(approval),
+            memoryWrites = emptyList(),
+            provider = "local-planner",
+            intent = if (approval != null) "plan_approval" else "plan_result"
+        )
+    }
+
+    private fun resultIsSuccessForPlan(action: ButlerAction): Boolean {
+        // This method is reached only after ActionExecutor returned Success.
+        return action.payload[ProductionTaskExecutor.PLAN_ID_ARGUMENT].isNullOrBlank().not()
+    }
+
+    private fun resumePlannerAfterApproval(
+        action: ButlerAction,
+        approved: Boolean,
+        detail: String
+    ) {
+        val planId = action.payload[ProductionTaskExecutor.PLAN_ID_ARGUMENT] ?: return
+        val taskId = action.payload[ProductionTaskExecutor.TASK_ID_ARGUMENT] ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val planner = planningRuntime.planner
+                val resolved = planner.resolveApproval(
+                    planId = planId,
+                    taskId = taskId,
+                    actionId = action.id,
+                    approved = approved,
+                    executionDetail = detail
+                )
+                if (!resolved) return@launch
+
+                val current = _uiState.value
+                val context = ConversationContext(
+                    recentMessages = current.messages.takeLast(16),
+                    memories = current.memories,
+                    settings = current.settings
+                )
+                val result = planner.executePlan(planId, context)
+                val plan = planner.getPlan(planId)
+                val approval = result.pendingApproval
+                if (approval != null) {
+                    _uiState.update { state ->
+                        state.copy(
+                            pendingActions = (state.pendingActions.filterNot { it.id == approval.id } +
+                                approval).takeLast(12),
+                            transientMessage = "The plan needs another approval."
+                        )
+                    }
+                    store.savePendingActions(_uiState.value.pendingActions)
+                } else {
+                    val statusText = if (result.success) "Plan completed." else "Plan stopped."
+                    val message = ChatMessage(
+                        sender = Sender.AURA,
+                        text = buildString {
+                            append(statusText).append("\\n")
+                            append("Plan ID: ").append(planId).append("\\n")
+                            append(result.finalOutput ?: result.errorSummary ?: plan?.status?.name.orEmpty())
+                        },
+                        provider = "local-planner",
+                        intent = "plan_resumed"
+                    )
+                    _uiState.update { state ->
+                        state.copy(
+                            messages = state.messages + message,
+                            transientMessage = statusText,
+                            speechText = if (state.settings.spokenReplies) {
+                                SpeechTextSanitizer.clean(message.text).take(2_600)
+                            } else null,
+                            speechSequence = state.speechSequence + 1
+                        )
+                    }
+                    store.saveMessages(_uiState.value.messages)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(transientMessage = "The saved plan could not resume: " +
+                        (error.message ?: error.javaClass.simpleName))
+                }
+            }
+        }
     }
 
     private fun resolvedAssistantText(
