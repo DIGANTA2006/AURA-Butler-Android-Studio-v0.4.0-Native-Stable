@@ -480,7 +480,7 @@ class ProactiveEngine(
             name = "Daily Briefing",
             description = "Generates a morning summary from local device state and AURA conversation context",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
-            enabled = true
+            enabled = true,
             task = { context ->
                 val briefings = generateDailyBriefing(context)
                 val text = briefings.firstOrNull()?.description
@@ -778,7 +778,22 @@ class ProactiveEngine(
             .toList()
         return AgentContext(
             deviceState = contextProvider.getDeviceState(),
-            recentMemories = memoryResult?.entries?.map { it.entry }.orEmpty(),
+            recentMemories = memoryResult?.entries?.map { it.entry }
+                ?: conversationContext.memories.map { item ->
+                    SemanticMemory.MemoryEntry(
+                        id = item.id,
+                        content = SecretRedactor.redact(item.value, 2_000),
+                        label = SecretRedactor.redact(item.label, 120),
+                        embedding = null,
+                        lastAccessed = item.createdAtEpochMs,
+                        createdAt = item.createdAtEpochMs,
+                        tags = if (item.label.startsWith("[RESEARCH]", ignoreCase = true)) {
+                            setOf("research")
+                        } else {
+                            emptySet()
+                        }
+                    )
+                },
             activePlans = emptyList(),
             userPreferences = settings,
             recentMessages = userMessages.map { SecretRedactor.redact(it.text, 1_000) },
@@ -1072,7 +1087,7 @@ class ProactiveEngine(
         return listOf(
             ProactiveSuggestion(
                 type = SuggestionType.PREPARATION,
-                title = "Your local daily briefing",
+                title = "Your local daily briefing — ${localNow.toLocalDate()}",
                 description = description,
                 action = ProactiveAction(
                     type = ActionType.SHOW_INSIGHT,
@@ -1154,7 +1169,7 @@ class ProactiveEngine(
                 "Would a flexible recurring task plan help?"
             results += ProactiveSuggestion(
                 type = SuggestionType.INSIGHT,
-                title = "A recurring AURA conversation pattern",
+                title = "Recurring topic: " + category,
                 description = description,
                 action = ProactiveAction(
                     type = ActionType.SCHEDULE_TASK,
