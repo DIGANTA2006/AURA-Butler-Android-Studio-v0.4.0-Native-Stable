@@ -125,6 +125,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
         // loadPendingActions() filters expired/legacy entries. Persist the clean
         // list immediately so stale approvals cannot survive indefinitely on disk.
         store.savePendingActions(initialState.pendingActions)
+        refreshProactiveSuggestions()
     }
 
     fun setInput(value: String) {
@@ -334,6 +335,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 store.saveReminders(_uiState.value.reminders)
                 store.saveHistory(_uiState.value.actionHistory)
                 store.savePendingActions(_uiState.value.pendingActions)
+                refreshProactiveSuggestions()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -1135,6 +1137,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     memories = state.memories,
                     settings = state.settings
                 )
+                engine.refreshNow()
                 val suggestions = engine.getSuggestions(context)
                 _uiState.update { it.copy(proactiveSuggestions = suggestions) }
             } catch (cancelled: CancellationException) {
@@ -1447,6 +1450,12 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             .distinct()
             .joinToString(" ")
             .ifBlank { original }
+    }
+
+    override fun onCleared() {
+        proactiveEngineInstance?.stop()
+        proactiveEngineInstance = null
+        super.onCleared()
     }
 
     private fun mergeMemories(
