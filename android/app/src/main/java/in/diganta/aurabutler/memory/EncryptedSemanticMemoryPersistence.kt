@@ -110,12 +110,16 @@ class EncryptedSemanticMemoryPersistence(
         }
     }
 
-    override fun delete(id: String) = synchronized(lock) {
-        writableDatabase.delete("semantic_memories", "id=?", arrayOf(id))
+    override fun delete(id: String) {
+        synchronized(lock) {
+            writableDatabase.delete("semantic_memories", "id=?", arrayOf(id))
+        }
     }
 
-    override fun clear() = synchronized(lock) {
-        writableDatabase.delete("semantic_memories", null, null)
+    override fun clear() {
+        synchronized(lock) {
+            writableDatabase.delete("semantic_memories", null, null)
+        }
     }
 
     private fun pruneToCapacity(db: SQLiteDatabase) {
