@@ -67,6 +67,7 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.ScreenSearchDesktop
 import androidx.compose.material.icons.rounded.Settings
