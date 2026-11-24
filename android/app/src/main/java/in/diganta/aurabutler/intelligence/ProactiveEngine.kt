@@ -222,6 +222,7 @@ class ProactiveEngine(
                 ).also(::persistAgent)
             }
         }
+        updateSemanticMemory(semanticMemory)
     }
 
     fun updateSemanticMemory(memory: SemanticMemory?) {
