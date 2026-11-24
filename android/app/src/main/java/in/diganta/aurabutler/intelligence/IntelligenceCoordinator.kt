@@ -2,6 +2,7 @@ package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.data.KeylessLiveInfoProvider
+import `in`.diganta.aurabutler.domain.LocalButlerEngine
 import `in`.diganta.aurabutler.memory.EncryptedSemanticMemoryPersistence
 import `in`.diganta.aurabutler.memory.EmbeddingProvider
 import `in`.diganta.aurabutler.memory.LazyOnnxSentenceEmbeddingProvider
