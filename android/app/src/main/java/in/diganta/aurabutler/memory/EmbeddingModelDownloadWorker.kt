@@ -97,7 +97,8 @@ object EmbeddingModelFiles {
     }
 
     fun enqueueIfMissing(context: Context) {
-        if (isInstalled(context)) return
+        // Do not hash the model on the main thread during Application startup.
+        // The worker verifies the manifest and both artifacts on Dispatchers.IO.
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.UNMETERED)
             .setRequiresBatteryNotLow(true)
@@ -135,6 +136,9 @@ class EmbeddingModelDownloadWorker(
         val vocabulary = EmbeddingModelFiles.vocabularyFile(applicationContext)
         val marker = EmbeddingModelFiles.completionMarker(applicationContext)
         try {
+            if (EmbeddingModelFiles.isInstalled(applicationContext)) {
+                return@withContext Result.success()
+            }
             directory.mkdirs().also { created ->
                 if (!created && !directory.isDirectory) {
                     throw IOException("Could not create the private embedding-model directory.")
