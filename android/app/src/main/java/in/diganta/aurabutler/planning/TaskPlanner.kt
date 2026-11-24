@@ -25,7 +25,7 @@ class TaskPlanner(
     private val toolRegistry: ReasoningEngine.ToolRegistry,
     private val planStore: PlanStore,
     private val executor: ProductionTaskExecutor =
-        ProductionTaskExecutor(reasoningEngine, toolRegistry)
+        ProductionTaskExecutor(reasoningEngine)
 ) {
 
     data class TaskNode(
