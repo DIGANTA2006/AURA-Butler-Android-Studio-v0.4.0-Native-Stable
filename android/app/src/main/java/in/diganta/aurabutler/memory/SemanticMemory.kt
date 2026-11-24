@@ -178,7 +178,13 @@ class SemanticMemory(
                     lastAccessed = existing?.lastAccessed ?: item.createdAtEpochMs,
                     createdAt = item.createdAtEpochMs,
                     importance = 0.65,
-                    tags = (existing?.tags.orEmpty() + "secure-store-index"),
+                    tags = buildSet {
+                        addAll(existing?.tags.orEmpty())
+                        add("secure-store-index")
+                        if (safeLabel.startsWith("[RESEARCH]", ignoreCase = true)) {
+                            add("research")
+                        }
+                    },
                     source = MemorySource.USER_INPUT
                 )
             )
