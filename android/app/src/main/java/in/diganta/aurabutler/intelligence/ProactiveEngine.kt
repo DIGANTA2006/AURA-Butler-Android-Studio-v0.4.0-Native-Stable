@@ -208,7 +208,7 @@ class ProactiveEngine(
                     runCount = state.runCount.coerceAtLeast(0),
                     successCount = state.successCount.coerceAtLeast(0),
                     errorCount = state.errorCount.coerceAtLeast(0)
-                )
+                ).also(::persistAgent)
             }
         }
     }
@@ -219,9 +219,7 @@ class ProactiveEngine(
 
     fun updateSettings(updated: ButlerSettings) {
         settings = updated
-        if (!updated.proactiveSuggestionsEnabled) stop()
-        else if (updated.intelligenceMode == in.diganta.aurabutler.model.IntelligenceMode.ENHANCED ||
-            updated.intelligenceMode == in.diganta.aurabutler.model.IntelligenceMode.AUTONOMOUS) start()
+        if (!updated.proactiveSuggestionsEnabled) stop() else start()
     }
 
     /**
@@ -845,7 +843,7 @@ class ProactiveEngine(
         if (ctx.recentMessages.isEmpty()) return emptyList()
         val recentUserText = ctx.recentMessages.takeLast(8)
             .filter { !SecretRedactor.containsSensitive(it) }
-            .map(SecretRedactor::redact)
+            .map { SecretRedactor.redact(it, 800) }
         if (recentUserText.isEmpty()) return emptyList()
 
         val reminders = recentUserText.filter { message ->
