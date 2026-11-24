@@ -116,6 +116,36 @@ class ProactiveEngineLifecycleTest {
     }
 
     @Test
+    fun restoresPendingApprovalCreatedByAWorkManagerProcess() {
+        val action = pendingAction
+        val suggestion = ProactiveEngine.ProactiveSuggestion(
+            id = "work-manager-pending-approval",
+            type = ProactiveEngine.SuggestionType.MAINTENANCE,
+            title = "Open a saved project page",
+            description = "Background agent prepared an approved action.",
+            action = ProactiveEngine.ProactiveAction(
+                type = ProactiveEngine.ActionType.OPEN_APP,
+                payload = mapOf("app" to "project page"),
+                requiresConfirmation = true
+            ),
+            confidence = 0.8,
+            priority = ProactiveEngine.Priority.MEDIUM,
+            context = ProactiveEngine.SuggestionContext(
+                trigger = ProactiveEngine.Trigger.DEVICE_STATE
+            ),
+            pendingApprovalAction = action
+        )
+        val persistence = FakePersistence().apply { saveSuggestion(suggestion) }
+        val engine = engine(context(), persistence)
+
+        try {
+            assertEquals(listOf(action.id), engine.getPendingApprovalActions().map { it.id })
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
     fun acceptedSuggestionStoresPendingActionAndDoesNotMarkItCompleteUntilApproval() = runBlocking {
         val action = ButlerAction(
             id = "proactive-approval-1",
