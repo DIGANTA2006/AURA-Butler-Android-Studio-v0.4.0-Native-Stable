@@ -414,12 +414,31 @@ class ProactiveEngine(
     fun getSuggestionForAction(actionId: String): ProactiveSuggestion? =
         suggestions.values.firstOrNull { it.pendingApprovalAction?.id == actionId }
 
+    fun expirePendingApprovals(): List<ButlerAction> {
+        val now = System.currentTimeMillis()
+        val expired = mutableListOf<ButlerAction>()
+        suggestions.values.forEach { suggestion ->
+            val action = suggestion.pendingApprovalAction ?: return@forEach
+            if (action.expiresAtEpochMs <= now || suggestion.expiresAt <= now) {
+                expired += action
+                val updated = suggestion.copy(
+                    pendingApprovalAction = null,
+                    dismissed = true,
+                    lastActionError = "Approval expired while AURA was closed. The action was not executed."
+                )
+                suggestions[suggestion.id] = updated
+                persistence?.saveSuggestion(updated)
+            }
+        }
+        return expired.distinctBy { it.id }
+    }
+
     fun getPendingApprovalActions(): List<ButlerAction> {
         val now = System.currentTimeMillis()
         return suggestions.values
             .mapNotNull { suggestion ->
                 suggestion.pendingApprovalAction
-                    ?.takeIf { !it.isExpired() && suggestion.expiresAt > now }
+                    ?.takeIf { it.expiresAtEpochMs > now && suggestion.expiresAt > now }
             }
             .distinctBy { it.id }
             .sortedByDescending { it.createdAtEpochMs }
