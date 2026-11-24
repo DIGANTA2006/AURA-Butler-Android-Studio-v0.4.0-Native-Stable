@@ -231,6 +231,7 @@ data class AuraUiState(
         )
     ),
     val pendingActions: List<ButlerAction> = emptyList(),
+    val proactiveSuggestions: List<in.diganta.aurabutler.intelligence.ProactiveEngine.ProactiveSuggestion> = emptyList(),
     val memories: List<MemoryItem> = emptyList(),
     val reminders: List<ReminderItem> = emptyList(),
     val actionHistory: List<ActionHistoryItem> = emptyList(),
