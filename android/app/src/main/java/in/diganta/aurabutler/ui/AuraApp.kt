@@ -136,6 +136,7 @@ import `in`.diganta.aurabutler.model.ActionRisk
 import `in`.diganta.aurabutler.model.AppTab
 import `in`.diganta.aurabutler.model.AuraUiState
 import `in`.diganta.aurabutler.model.ButlerAction
+import `in`.diganta.aurabutler.intelligence.ProactiveEngine
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ChatMessage
 import `in`.diganta.aurabutler.model.MemoryItem
@@ -555,7 +556,9 @@ fun AuraApp(viewModel: ButlerViewModel) {
                     onStopVoice = voiceManager::stop,
                     onAttach = { documentPicker.launch(arrayOf("*/*")) },
                     onApprove = ::approve,
-                    onReject = viewModel::rejectAction
+                    onReject = viewModel::rejectAction,
+                    onAcceptSuggestion = viewModel::acceptProactiveSuggestion,
+                    onDismissSuggestion = viewModel::dismissProactiveSuggestion
                 )
 
                 AppTab.ANALYZER -> AnalyzerScreen(
@@ -679,10 +682,13 @@ private fun ButlerScreen(
     onStopVoice: () -> Unit,
     onAttach: () -> Unit,
     onApprove: (ButlerAction) -> Unit,
-    onReject: (ButlerAction) -> Unit
+    onReject: (ButlerAction) -> Unit,
+    onAcceptSuggestion: (String) -> Unit,
+    onDismissSuggestion: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
-    val totalItems = state.messages.size + state.pendingActions.size + if (state.isBusy) 1 else 0
+    val totalItems = state.messages.size + state.pendingActions.size +
+        state.proactiveSuggestions.size + if (state.isBusy) 1 else 0
     val streamingScrollBucket = state.streamingPreview.length / 96
 
     LaunchedEffect(totalItems) {
@@ -738,6 +744,12 @@ private fun ButlerScreen(
             }
             item {
                 QuickChip(
+                    "Execute a plan",
+                    Icons.Rounded.TaskAlt
+                ) { onQuickPrompt("plan and execute: Organize my day, identify the most important tasks, and ask for approval before any device or external action.") }
+            }
+            item {
+                QuickChip(
                     "Order food",
                     Icons.Rounded.Fastfood
                 ) { onQuickPrompt("Help me choose and order food for dinner.") }
@@ -772,6 +784,13 @@ private fun ButlerScreen(
             items(state.messages, key = { it.id }) { message ->
                 ChatBubble(message)
             }
+            items(state.proactiveSuggestions, key = { it.id }) { suggestion ->
+                ProactiveSuggestionCard(
+                    suggestion = suggestion,
+                    onAccept = { onAcceptSuggestion(suggestion.id) },
+                    onDismiss = { onDismissSuggestion(suggestion.id) }
+                )
+            }
             items(state.pendingActions, key = { it.id }) { action ->
                 ActionApprovalCard(
                     action = action,
@@ -794,6 +813,63 @@ private fun ButlerScreen(
             onStopVoice = onStopVoice,
             onAttach = onAttach
         )
+    }
+}
+
+@Composable
+private fun ProactiveSuggestionCard(
+    suggestion: ProactiveEngine.ProactiveSuggestion,
+    onAccept: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    suggestion.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    suggestion.priority.name.lowercase().replaceFirstChar { it.uppercase() },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Text(
+                suggestion.description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            if (!suggestion.lastActionError.isNullOrBlank()) {
+                Text(
+                    suggestion.lastActionError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+                Button(onClick = onAccept) { Text("Accept") }
+            }
+        }
     }
 }
 
