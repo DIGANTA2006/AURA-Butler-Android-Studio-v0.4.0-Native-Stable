@@ -114,6 +114,11 @@ object EmbeddingModelFiles {
         )
     }
 
+    /** Cancel pending model provisioning when the owner disables semantic memory. */
+    fun cancelPendingDownload(context: Context) {
+        WorkManager.getInstance(context.applicationContext).cancelUniqueWork(WORK_NAME)
+    }
+
     internal fun modelUrl(): String =
         MODEL_BASE + "onnx/model_qint8_arm64.onnx"
 
