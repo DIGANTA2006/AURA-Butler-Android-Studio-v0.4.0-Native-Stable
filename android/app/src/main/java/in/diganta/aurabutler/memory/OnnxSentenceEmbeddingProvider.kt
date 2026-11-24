@@ -253,3 +253,33 @@ internal class WordPieceTokenizer(vocabularyLines: List<String>) {
         const val MAX_WORD_CHARS = 100
     }
 }
+
+
+/**
+ * Defers ONNX session creation until the pinned model has been installed.
+ * Production callers never silently substitute lexical feature hashes.
+ */
+class LazyOnnxSentenceEmbeddingProvider(
+    context: android.content.Context
+) : EmbeddingProvider, Closeable {
+    private val appContext = context.applicationContext
+    private val delegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        require(EmbeddingModelFiles.isInstalled(appContext)) {
+            "The verified local semantic model is not installed yet. " +
+                "Keep AURA on unmetered Wi-Fi to finish model setup."
+        }
+        OnnxSentenceEmbeddingProvider(
+            EmbeddingModelFiles.modelFile(appContext),
+            EmbeddingModelFiles.vocabularyFile(appContext)
+        )
+    }
+
+    override val dimension: Int = OnnxSentenceEmbeddingProvider.EMBEDDING_DIMENSION
+    val isModelBacked: Boolean = true
+
+    override fun embed(text: String): FloatArray = delegate.value.embed(text)
+
+    override fun close() {
+        if (delegate.isInitialized()) delegate.value.close()
+    }
+}
