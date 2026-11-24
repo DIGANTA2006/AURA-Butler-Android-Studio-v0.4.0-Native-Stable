@@ -31,6 +31,10 @@ import `in`.diganta.aurabutler.domain.LocalButlerEngine
 import `in`.diganta.aurabutler.domain.ProductionButlerEngine
 import `in`.diganta.aurabutler.planning.AndroidPlanningRuntime
 import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
+import `in`.diganta.aurabutler.intelligence.AndroidProactiveActionHandler
+import `in`.diganta.aurabutler.intelligence.AndroidProactiveContextProvider
+import `in`.diganta.aurabutler.intelligence.EncryptedProactivePersistence
+import `in`.diganta.aurabutler.intelligence.ProactiveEngine
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ActionHistoryItem
 import `in`.diganta.aurabutler.model.AppTab
@@ -89,6 +93,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     private val planningRuntime by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AndroidPlanningRuntime(getApplication())
     }
+
+    @Volatile
+    private var proactiveEngineInstance: ProactiveEngine? = null
+
+    private val proactiveEngineLock = Any()
 
     private val initialState = AuraUiState(
         messages = store.loadMessages().ifEmpty { AuraUiState().messages },
@@ -359,6 +368,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     mapOf("kind" to action.kind.name, "title" to action.title)
                 )
             }
+            resolveProactiveActionAfterApproval(
+                action,
+                completed = false,
+                detail = "Approval expired. The action was not executed."
+            )
             resumePlannerAfterApproval(
                 action,
                 approved = false,
@@ -381,6 +395,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                     mapOf("kind" to action.kind.name, "title" to action.title)
                 )
             }
+            resolveProactiveActionAfterApproval(
+                action,
+                completed = false,
+                detail = "The local capability policy denied the action."
+            )
             resumePlannerAfterApproval(
                 action,
                 approved = false,
@@ -434,6 +453,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                resolveProactiveActionAfterApproval(
+                    action,
+                    completed = true,
+                    detail = result.detail
+                )
                 resumePlannerAfterApproval(
                     action,
                     approved = true,
@@ -461,6 +485,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     )
                 }
+                resolveProactiveActionAfterApproval(
+                    action,
+                    completed = false,
+                    detail = result.reason
+                )
                 resumePlannerAfterApproval(action, approved = false, detail = result.reason)
             }
         }
@@ -833,6 +862,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 mapOf("kind" to action.kind.name, "title" to action.title)
             )
         }
+        resolveProactiveActionAfterApproval(
+            action,
+            completed = false,
+            detail = "The user declined the proposed action."
+        )
         resumePlannerAfterApproval(
             action,
             approved = false,
@@ -1003,6 +1037,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         }
+        refreshProactiveSuggestions()
     }
 
     fun refreshFromStore() {
@@ -1022,6 +1057,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 }.getOrDefault(it.notificationVaultCount)
             )
         }
+        refreshProactiveSuggestions()
     }
 
     fun clearConversation() {
@@ -1045,6 +1081,174 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun consumeTransientMessage() {
         _uiState.update { it.copy(transientMessage = null) }
+    }
+
+    private suspend fun proactiveEngine(): ProactiveEngine = withContext(Dispatchers.IO) {
+        val application = getApplication<Application>()
+        val currentSettings = _uiState.value.settings
+        val semantic = butler.semanticMemoryForProactive()
+        val existing = proactiveEngineInstance
+        if (existing != null) {
+            existing.updateSettings(currentSettings)
+            existing.updateSemanticMemory(semantic)
+            existing
+        } else {
+            synchronized(proactiveEngineLock) {
+                proactiveEngineInstance?.let { current ->
+                    current.updateSettings(currentSettings)
+                    current.updateSemanticMemory(semantic)
+                    return@withContext current
+                }
+                ProactiveEngine(
+                    aiProvider = HybridAiProvider(),
+                    semanticMemory = semantic,
+                    settings = currentSettings,
+                    contextProvider = AndroidProactiveContextProvider(application) {
+                        val state = _uiState.value
+                        ConversationContext(
+                            recentMessages = state.messages.takeLast(16),
+                            memories = state.memories,
+                            settings = state.settings
+                        )
+                    },
+                    persistence = EncryptedProactivePersistence(application),
+                    actionHandler = AndroidProactiveActionHandler(application)
+                ).also { engine ->
+                    proactiveEngineInstance = engine
+                    engine.start()
+                }
+            }
+        }
+    }
+
+    fun refreshProactiveSuggestions() {
+        if (!_uiState.value.settings.proactiveSuggestionsEnabled) {
+            _uiState.update { it.copy(proactiveSuggestions = emptyList()) }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val engine = proactiveEngine()
+                val state = _uiState.value
+                val context = ConversationContext(
+                    recentMessages = state.messages.takeLast(16),
+                    memories = state.memories,
+                    settings = state.settings
+                )
+                val suggestions = engine.getSuggestions(context)
+                _uiState.update { it.copy(proactiveSuggestions = suggestions) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        proactiveSuggestions = emptyList(),
+                        transientMessage = "Proactive suggestions are temporarily unavailable: " +
+                            (error.message ?: error.javaClass.simpleName)
+                    )
+                }
+            }
+        }
+    }
+
+    fun acceptProactiveSuggestion(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val engine = proactiveEngine()
+                val state = _uiState.value
+                val context = ConversationContext(
+                    recentMessages = state.messages.takeLast(16),
+                    memories = state.memories,
+                    settings = state.settings
+                )
+                val result = engine.acceptSuggestionDetailed(id, context)
+                if (result.pendingApproval != null) {
+                    _uiState.update { current ->
+                        current.copy(
+                            pendingActions = (
+                                current.pendingActions.filterNot { it.id == result.pendingApproval.id } +
+                                    result.pendingApproval
+                            ).takeLast(12),
+                            transientMessage = "Review and approve the suggested action before AURA executes it."
+                        )
+                    }
+                    store.savePendingActions(_uiState.value.pendingActions)
+                } else if (result.completed && !result.detail.isNullOrBlank()) {
+                    val message = ChatMessage(
+                        sender = Sender.AURA,
+                        text = result.detail,
+                        provider = "proactive",
+                        intent = "proactive_accepted"
+                    )
+                    _uiState.update { current ->
+                        current.copy(
+                            messages = current.messages + message,
+                            transientMessage = result.detail
+                        )
+                    }
+                    store.saveMessages(_uiState.value.messages)
+                } else if (!result.error.isNullOrBlank()) {
+                    _uiState.update { it.copy(transientMessage = result.error) }
+                }
+                _uiState.update { it.copy(proactiveSuggestions = engine.getSuggestions(context)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(transientMessage = "The proactive action could not be completed: " +
+                        (error.message ?: error.javaClass.simpleName))
+                }
+            }
+        }
+    }
+
+    fun dismissProactiveSuggestion(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val engine = proactiveEngine()
+                engine.dismissSuggestion(id)
+                val state = _uiState.value
+                _uiState.update {
+                    it.copy(proactiveSuggestions = engine.getSuggestions(
+                        ConversationContext(
+                            recentMessages = state.messages.takeLast(16),
+                            memories = state.memories,
+                            settings = state.settings
+                        )
+                    ))
+                }
+            } catch (error: Exception) {
+                _uiState.update { it.copy(transientMessage = error.message ?: "Could not dismiss suggestion.") }
+            }
+        }
+    }
+
+    private fun resolveProactiveActionAfterApproval(
+        action: ButlerAction,
+        completed: Boolean,
+        detail: String
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val engine = proactiveEngine()
+                if (engine.resolveActionApproval(action.id, completed, detail)) {
+                    val state = _uiState.value
+                    val context = ConversationContext(
+                        recentMessages = state.messages.takeLast(16),
+                        memories = state.memories,
+                        settings = state.settings
+                    )
+                    _uiState.update { it.copy(proactiveSuggestions = engine.getSuggestions(context)) }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(transientMessage = "Could not update the proactive suggestion: " +
+                        (error.message ?: error.javaClass.simpleName))
+                }
+            }
+        }
     }
 
     private sealed interface PlanningCommand {
