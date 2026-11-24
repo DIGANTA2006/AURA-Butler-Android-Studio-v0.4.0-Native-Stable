@@ -814,24 +814,27 @@ class ProactiveEngine(
             .filter { !SecretRedactor.containsSensitive(it.text) }
             .takeLast(80)
             .toList()
+        val semanticEntries = memoryResult?.entries?.map { it.entry }.orEmpty()
+        val privateEntries = conversationContext.memories.map { item ->
+            SemanticMemory.MemoryEntry(
+                id = item.id,
+                content = SecretRedactor.redact(item.value, 2_000),
+                label = SecretRedactor.redact(item.label, 120),
+                embedding = null,
+                lastAccessed = item.createdAtEpochMs,
+                createdAt = item.createdAtEpochMs,
+                tags = if (item.label.startsWith("[RESEARCH]", ignoreCase = true)) {
+                    setOf("research")
+                } else {
+                    emptySet()
+                }
+            )
+        }
         return AgentContext(
             deviceState = contextProvider.getDeviceState(),
-            recentMemories = memoryResult?.entries?.map { it.entry }
-                ?: conversationContext.memories.map { item ->
-                    SemanticMemory.MemoryEntry(
-                        id = item.id,
-                        content = SecretRedactor.redact(item.value, 2_000),
-                        label = SecretRedactor.redact(item.label, 120),
-                        embedding = null,
-                        lastAccessed = item.createdAtEpochMs,
-                        createdAt = item.createdAtEpochMs,
-                        tags = if (item.label.startsWith("[RESEARCH]", ignoreCase = true)) {
-                            setOf("research")
-                        } else {
-                            emptySet()
-                        }
-                    )
-                },
+            recentMemories = (semanticEntries + privateEntries)
+                .distinctBy { it.id }
+                .take(MAX_PROACTIVE_CONTEXT_MEMORIES),
             activePlans = emptyList(),
             userPreferences = settings,
             recentMessages = userMessages.map { SecretRedactor.redact(it.text, 1_000) },
@@ -909,10 +912,10 @@ class ProactiveEngine(
                 suggestions += ProactiveSuggestion(
                     type = SuggestionType.PREPARATION,
                     title = "Good Morning",
-                    description = "Would you like your daily briefing with weather, schedule, and priorities?",
+                    description = "Would you like your local AURA briefing with device status and saved-memory topics?"
                     action = ProactiveAction(
                         type = ProactiveEngine.ActionType.ASK_QUESTION,
-                        payload = mapOf("question" to "Show daily briefing?"),
+                        payload = mapOf("question" to "Show your local AURA briefing?"),
                         requiresConfirmation = true
                     ),
                     confidence = 0.8,
@@ -1319,3 +1322,4 @@ private const val MAX_RESEARCH_FOLLOW_UPS = 2
 private const val MAX_RESEARCH_GOAL_CHARS = 2_000
 private const val SUGGESTION_TTL_MS = 24L * 60 * 60 * 1_000
 private const val MAX_PENDING_APPROVAL_ACTIONS = 12
+private const val MAX_PROACTIVE_CONTEXT_MEMORIES = 250
