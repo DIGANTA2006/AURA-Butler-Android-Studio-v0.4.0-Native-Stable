@@ -2,7 +2,6 @@ package `in`.diganta.aurabutler.planning
 
 import android.content.Context
 import `in`.diganta.aurabutler.data.HybridAiProvider
-import `in`.diganta.aurabutler.data.KeylessLiveInfoProvider
 import `in`.diganta.aurabutler.intelligence.ReasoningEngine
 import `in`.diganta.aurabutler.model.ConversationContext
 
@@ -29,8 +28,7 @@ class AndroidPlanningRuntime(context: Context) {
         toolRegistry = toolRegistry,
         planStore = planStore,
         executor = ProductionTaskExecutor(
-            reasoningEngine = reasoningEngine,
-            liveInfo = KeylessLiveInfoProvider(appContext)
+            reasoningEngine = reasoningEngine
         )
     )
 
