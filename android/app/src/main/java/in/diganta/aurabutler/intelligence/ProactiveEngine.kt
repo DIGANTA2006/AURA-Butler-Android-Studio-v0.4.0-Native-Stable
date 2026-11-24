@@ -229,7 +229,9 @@ class ProactiveEngine(
 
     fun updateSettings(updated: ButlerSettings) {
         settings = updated
-        if (!updated.proactiveSuggestionsEnabled) stop() else start()
+        if (!updated.proactiveSuggestionsEnabled) stop()
+        // Production scheduling is owned by AndroidProactiveScheduler/WorkManager.
+        // Call start() explicitly only for in-process consumers that opt into it.
     }
 
     /**
