@@ -325,10 +325,13 @@ class TaskPlanner(
 
             val allTasks = taskMap.values.toList()
             val finalStatus = when {
-                failedCount > 0 || allTasks.any { it.status == TaskStatus.BLOCKED } ->
-                    PlanStatus.FAILED
+                failedCount > 0 || allTasks.any {
+                    it.status == TaskStatus.BLOCKED ||
+                        it.status == TaskStatus.FAILED ||
+                        it.status == TaskStatus.SKIPPED
+                } -> PlanStatus.FAILED
                 allTasks.isNotEmpty() && allTasks.all {
-                    it.status == TaskStatus.COMPLETED || it.status == TaskStatus.SKIPPED
+                    it.status == TaskStatus.COMPLETED
                 } -> PlanStatus.COMPLETED
                 else -> PlanStatus.FAILED
             }
