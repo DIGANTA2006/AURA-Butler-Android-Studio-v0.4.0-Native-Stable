@@ -6,6 +6,7 @@ import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import `in`.diganta.aurabutler.model.ButlerAction
+import `in`.diganta.aurabutler.model.Sender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +15,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -22,6 +25,7 @@ import java.util.concurrent.TimeUnit
 
 private const val MIN_REFRESH_INTERVAL_MS = 60_000L
 private const val MIN_SUGGESTION_CONFIDENCE = 0.4
+private const val INTERRUPTED_AGENT_RETRY_MS = 5 * 60 * 1_000L
 
 /**
  * Proactive intelligence engine that anticipates needs, suggests actions,
@@ -146,7 +150,8 @@ class ProactiveEngine(
         val recentMemories: List<SemanticMemory.MemoryEntry>,
         val activePlans: List<String>,
         val userPreferences: ButlerSettings,
-        val recentMessages: List<String> = emptyList()
+        val recentMessages: List<String> = emptyList(),
+        val recentMessageTimestamps: List<Long> = emptyList()
     )
 
     data class DeviceState(
@@ -192,6 +197,7 @@ class ProactiveEngine(
 
     private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
     private val agents = ConcurrentHashMap<String, BackgroundAgent>()
+    private val dueAgentMutex = Mutex()
     @Volatile
     private var scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
     @Volatile
@@ -419,27 +425,17 @@ class ProactiveEngine(
      * Executes only agents whose persisted deadline is due. Used by WorkManager
      * after process recreation; it does not start the in-process timer pool.
      */
-    suspend fun runDueAgentsNow(): Int {
-        if (!settings.proactiveSuggestionsEnabled) return 0
-        val due = synchronized(this) {
-            if (running) return 0
-            running = true
-            val now = System.currentTimeMillis()
-            agents.values
-                .filter { it.enabled && (it.nextRun == null || it.nextRun <= now) }
-                .sortedBy { it.nextRun ?: 0L }
+    suspend fun runDueAgentsNow(): Int = dueAgentMutex.withLock {
+        if (!settings.proactiveSuggestionsEnabled) return@withLock 0
+        val now = System.currentTimeMillis()
+        val due = agents.values
+            .filter { it.enabled && (it.nextRun == null || it.nextRun <= now) }
+            .sortedBy { it.nextRun ?: 0L }
+        due.forEach { agent ->
+            currentCoroutineContext().ensureActive()
+            runAgent(agent)
         }
-        var completed = 0
-        try {
-            due.forEach { agent ->
-                currentCoroutineContext().ensureActive()
-                runAgent(agent)
-                completed++
-            }
-            return completed
-        } finally {
-            synchronized(this) { running = false }
-        }
+        due.size
     }
 
     fun nextAgentRunAt(): Long? = agents.values
@@ -482,41 +478,18 @@ class ProactiveEngine(
         registerAgent(BackgroundAgent(
             id = "aura-agent-daily-briefing-v1",
             name = "Daily Briefing",
-            description = "Generates a morning summary of schedule, weather, and priorities",
+            description = "Generates a morning summary from local device state and AURA conversation context",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
-            enabled = false, // Disabled until its required data source is integrated
+            enabled = true
             task = { context ->
-                val device = context.deviceState
-                val recent = context.recentMessages
-                    .filter { !SecretRedactor.containsSensitive(it) }
-                    .takeLast(5)
-                    .map { SecretRedactor.redact(it, 280) }
-                buildString {
-                    append("AURA daily briefing — ")
-                    append(java.text.DateFormat.getDateTimeInstance().format(java.util.Date()))
-                    append("\n\nDevice status: battery ")
-                    append(device.batteryLevel).append("%")
-                    append(if (device.isCharging) " (charging)" else "")
-                    append(", network ").append(device.networkType)
-                    append(", free app storage ")
-                    append(device.storageFreePercent.toInt()).append("%")
-                    append(", screen ").append(if (device.screenOn) "on" else "off")
-                    append(".")
-                    if (recent.isNotEmpty()) {
-                        append("\n\nRecent conversation topics:")
-                        recent.forEachIndexed { index, item ->
-                            append("\n").append(index + 1).append(". ").append(item)
-                        }
-                    }
-                    if (context.recentMemories.isNotEmpty()) {
-                        append("\n\nSaved memory index contains ")
-                        append(context.recentMemories.size)
-                        append(" relevant local entries.")
-                    }
-                    append("\n\nThis briefing uses local device and conversation context only; it does not claim calendar, email, or location access.")
-                }.let { output ->
-                    AgentResult(success = true, output = output.take(6_000))
-                }
+                val briefings = generateDailyBriefing(context)
+                val text = briefings.firstOrNull()?.description
+                    ?: "AURA checked local device and saved-memory context; no new briefing item is available."
+                AgentResult(
+                    success = true,
+                    output = text,
+                    suggestions = briefings
+                )
             }
         ))
 
@@ -603,14 +576,19 @@ class ProactiveEngine(
         registerAgent(BackgroundAgent(
             id = "aura-agent-habit-learning-v1",
             name = "Habit Learning",
-            description = "Detects recurring patterns and suggests automations",
+            description = "Detects recurring topics and time patterns in AURA's own chat history only",
             schedule = AgentSchedule.WEEKLY,
-            enabled = false, // Disabled until its required data source is integrated
-            task = { _ ->
+            enabled = true,
+            task = { context ->
+                val patterns = detectHabitPatterns(context)
                 AgentResult(
-                    success = false,
-                    output = "Habit analysis is unavailable until real usage signals are connected.",
-                    error = "No usage-history source is configured."
+                    success = true,
+                    output = if (patterns.isEmpty()) {
+                        "Insufficient repeated AURA conversation history to identify a reliable pattern."
+                    } else {
+                        "Detected " + patterns.size + " recurring AURA conversation pattern(s)."
+                    },
+                    suggestions = patterns
                 )
             }
         ))
@@ -619,14 +597,19 @@ class ProactiveEngine(
         registerAgent(BackgroundAgent(
             id = "aura-agent-research-follow-up-v1",
             name = "Research Follow-up",
-            description = "Checks for updates on previous research topics",
+            description = "Offers a user-approved refresh of explicitly tagged saved research notes",
             schedule = AgentSchedule.DAILY,
-            enabled = false, // Disabled until its required data source is integrated
-            task = { _ ->
+            enabled = true,
+            task = { context ->
+                val followUps = checkResearchUpdates(context)
                 AgentResult(
-                    success = false,
-                    output = "Research follow-up is unavailable until prior research topics and a live update source are connected.",
-                    error = "Research update source is not configured."
+                    success = true,
+                    output = if (followUps.isEmpty()) {
+                        "No explicitly tagged saved research note needs a follow-up prompt."
+                    } else {
+                        "Prepared " + followUps.size + " saved-research follow-up suggestion(s)."
+                    },
+                    suggestions = followUps
                 )
             }
         ))
@@ -648,7 +631,7 @@ class ProactiveEngine(
         val delay = (nextRun - now).coerceAtLeast(0L)
         scheduler.schedule({
             if (running && agents[agent.id]?.enabled == true) {
-                runAgent(scheduled)
+                scope.launch { runAgent(scheduled) }
             }
         }, delay, TimeUnit.MILLISECONDS)
     }
@@ -734,44 +717,46 @@ class ProactiveEngine(
         return values.takeIf { it.isNotEmpty() }
     }
 
-    private fun runAgent(agent: BackgroundAgent) {
+    private suspend fun runAgent(agent: BackgroundAgent) {
         val updatedAgent = agent.copy(
             lastRun = System.currentTimeMillis(),
             runCount = agent.runCount + 1
         )
         agents[agent.id] = updatedAgent
+        persistAgent(updatedAgent)
 
-        // Keep all suspend work inside the engine-owned, cancellable scope.
-        scope.launch {
-            try {
-                val agentContext = buildAgentContext()
-                val result = agent.task.execute(agentContext)
-                val successAgent = updatedAgent.copy(
-                    successCount = updatedAgent.successCount + (if (result.success) 1 else 0),
-                    errorCount = updatedAgent.errorCount + (if (result.success) 0 else 1),
-                    nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
-                )
-                agents[agent.id] = successAgent
-                persistAgent(successAgent)
+        try {
+            val agentContext = buildAgentContext()
+            val result = agent.task.execute(agentContext)
+            val nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
+            val completedAgent = updatedAgent.copy(
+                successCount = updatedAgent.successCount + if (result.success) 1 else 0,
+                errorCount = updatedAgent.errorCount + if (result.success) 0 else 1,
+                nextRun = nextRun
+            )
+            agents[agent.id] = completedAgent
+            persistAgent(completedAgent)
 
-                if (result.success) {
-                    result.suggestions.forEach(::upsertSuggestion)
-                }
+            if (result.success) result.suggestions.forEach(::upsertSuggestion)
 
-                // Agent-generated actions are never executed automatically.
-                // The user must review a suggestion and explicitly accept it.
-                if (running && successAgent.enabled) scheduleAgent(successAgent)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (e: Exception) {
-                val errorAgent = updatedAgent.copy(
-                    errorCount = updatedAgent.errorCount + 1,
-                    nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
-                )
-                agents[agent.id] = errorAgent
-                persistAgent(errorAgent)
-                if (running && errorAgent.enabled) scheduleAgent(errorAgent)
-            }
+            // Agent-generated actions are never executed automatically.
+            // The user must review a suggestion and explicitly accept it.
+            if (running && completedAgent.enabled) scheduleAgent(completedAgent)
+        } catch (cancelled: CancellationException) {
+            val interruptedAgent = updatedAgent.copy(
+                nextRun = System.currentTimeMillis() + INTERRUPTED_AGENT_RETRY_MS
+            )
+            agents[agent.id] = interruptedAgent
+            persistAgent(interruptedAgent)
+            throw cancelled
+        } catch (error: Exception) {
+            val failedAgent = updatedAgent.copy(
+                errorCount = updatedAgent.errorCount + 1,
+                nextRun = System.currentTimeMillis() + calculateNextRun(agent.schedule)
+            )
+            agents[agent.id] = failedAgent
+            persistAgent(failedAgent)
+            if (running && failedAgent.enabled) scheduleAgent(failedAgent)
         }
     }
 
@@ -785,13 +770,19 @@ class ProactiveEngine(
                 strategy = SemanticMemory.RetrievalStrategy.TEMPORAL
             )
         )
+        val userMessages = conversationContext.recentMessages
+            .asSequence()
+            .filter { it.sender == Sender.USER }
+            .filter { !SecretRedactor.containsSensitive(it.text) }
+            .takeLast(80)
+            .toList()
         return AgentContext(
             deviceState = contextProvider.getDeviceState(),
             recentMemories = memoryResult?.entries?.map { it.entry }.orEmpty(),
             activePlans = emptyList(),
             userPreferences = settings,
-            recentMessages = conversationContext.recentMessages.takeLast(12)
-                .map { it.text.take(1_000) }
+            recentMessages = userMessages.map { SecretRedactor.redact(it.text, 1_000) },
+            recentMessageTimestamps = userMessages.map { it.createdAtEpochMs }
         )
     }
 
@@ -810,7 +801,12 @@ class ProactiveEngine(
         
         // Device state suggestions
         allSuggestions += generateDeviceStateSuggestions(context)
-        
+
+        // Local, privacy-bounded behaviour and research follow-ups.
+        allSuggestions += detectHabitPatterns(context)
+        allSuggestions += checkResearchUpdates(context)
+        allSuggestions += generateDailyBriefing(context)
+
         // Filter and store
         val now = System.currentTimeMillis()
         for (suggestion in allSuggestions) {
@@ -1043,19 +1039,184 @@ class ProactiveEngine(
     }
 
     private fun generateDailyBriefing(ctx: AgentContext): List<ProactiveSuggestion> {
-        // Calendar and weather integrations are not connected; do not invent data.
-        return emptyList()
+        val localNow = java.time.ZonedDateTime.now()
+        if (localNow.hour !in 6..10) return emptyList()
+
+        val device = ctx.deviceState
+        val memoryTopics = ctx.recentMemories
+            .flatMap { it.metadata.relatedEntities }
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .take(3)
+            .map { it.key }
+
+        val description = buildString {
+            append("Your local AURA briefing: battery ")
+            append(device.batteryLevel).append("%")
+            append(if (device.isCharging) " and charging" else " and not charging")
+            append("; network ").append(device.networkType)
+            append("; app-storage availability ")
+            append(device.storageFreePercent.toInt()).append("%.")
+            if (memoryTopics.isNotEmpty()) {
+                append(" Topics in your saved memory include ")
+                append(memoryTopics.joinToString(", "))
+                append(".")
+            }
+            append(" This uses only AURA's local conversation, memory, and device-state data; ")
+            append("calendar, email, location, and other-app activity are not connected.")
+        }
+        return listOf(
+            ProactiveSuggestion(
+                type = SuggestionType.PREPARATION,
+                title = "Your local daily briefing",
+                description = description,
+                action = ProactiveAction(
+                    type = ActionType.SHOW_INSIGHT,
+                    payload = mapOf("insight" to description),
+                    requiresConfirmation = false
+                ),
+                confidence = 0.82,
+                priority = Priority.MEDIUM,
+                context = SuggestionContext(
+                    trigger = Trigger.TIME_BASED,
+                    relatedMemoryIds = ctx.recentMemories.take(5).map { it.id },
+                    timeRelevance = TimeRelevance.MORNING
+                ),
+                expiresAt = System.currentTimeMillis() + 4 * 60 * 60 * 1_000L
+            )
+        )
     }
 
-
     private fun detectHabitPatterns(ctx: AgentContext): List<ProactiveSuggestion> {
-        // No genuine usage-history source is connected yet.
-        return emptyList()
+        val now = System.currentTimeMillis()
+        val cutoff = now - HABIT_LOOKBACK_DAYS * MILLIS_PER_DAY
+        val activities = ctx.recentMessages.zip(ctx.recentMessageTimestamps)
+            .filter { (_, timestamp) -> timestamp in cutoff..now }
+        if (activities.size < MIN_PATTERN_EVENTS) return emptyList()
+
+        val categories = listOf(
+            "software development" to listOf(
+                "coding", "code", "programming", "debug", "bug", "api", "website", "app development"
+            ),
+            "study and coursework" to listOf(
+                "study", "exam", "lecture", "assignment", "semester", "lab report", "coursework"
+            ),
+            "design and creative work" to listOf(
+                "design", "drawing", "illustration", "artwork", "craft", "poster"
+            ),
+            "planning and deadlines" to listOf(
+                "deadline", "remind me", "task list", "schedule", "plan my", "due date"
+            )
+        )
+        val periodNames = mapOf(
+            0 to "overnight",
+            1 to "morning",
+            2 to "afternoon",
+            3 to "evening"
+        )
+        val results = mutableListOf<ProactiveSuggestion>()
+
+        for ((category, phrases) in categories) {
+            val matching = activities.filter { (message, _) ->
+                phrases.any { message.contains(it, ignoreCase = true) }
+            }
+            val strongestPeriod = matching.groupBy { (_, timestamp) ->
+                val hour = java.time.Instant.ofEpochMilli(timestamp)
+                    .atZone(java.time.ZoneId.systemDefault()).hour
+                when (hour) {
+                    in 0..4 -> 0
+                    in 5..11 -> 1
+                    in 12..17 -> 2
+                    else -> 3
+                }
+            }.entries.maxByOrNull { (_, items) ->
+                items.map { (_, timestamp) ->
+                    java.time.Instant.ofEpochMilli(timestamp)
+                        .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+                }.distinct().size
+            } ?: continue
+
+            val distinctDays = strongestPeriod.value.map { (_, timestamp) ->
+                java.time.Instant.ofEpochMilli(timestamp)
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+            }.distinct().size
+            if (distinctDays < MIN_PATTERN_DAYS) continue
+
+            val period = periodNames[strongestPeriod.key] ?: "different times"
+            val description = "Your recent AURA conversations returned to " + category +
+                " during the " + period + " on " + distinctDays +
+                " separate days in the last " + HABIT_LOOKBACK_DAYS +
+                " days. This reflects AURA chat history only, not activity in other apps. " +
+                "Would a flexible recurring task plan help?"
+            results += ProactiveSuggestion(
+                type = SuggestionType.INSIGHT,
+                title = "A recurring AURA conversation pattern",
+                description = description,
+                action = ProactiveAction(
+                    type = ActionType.SCHEDULE_TASK,
+                    payload = mapOf(
+                        "goal" to "Create a flexible, user-confirmed routine for " + category +
+                            ". Ask for preferred days and times before scheduling or changing anything."
+                    ),
+                    requiresConfirmation = true
+                ),
+                confidence = (0.55 + distinctDays * 0.06).coerceAtMost(0.84),
+                priority = Priority.LOW,
+                context = SuggestionContext(
+                    trigger = Trigger.USER_HABIT,
+                    timeRelevance = TimeRelevance.ANYTIME
+                ),
+                expiresAt = now + SUGGESTION_TTL_MS
+            )
+        }
+        return results.sortedByDescending { it.confidence }.take(MAX_HABIT_SUGGESTIONS)
     }
 
     private fun checkResearchUpdates(ctx: AgentContext): List<ProactiveSuggestion> {
-        // Would check for updates on previous research topics
-        return emptyList()
+        val researchEntries = ctx.recentMemories.filter { entry ->
+            entry.tags.any { tag ->
+                tag.equals("research", ignoreCase = true) ||
+                    tag.equals("research-note", ignoreCase = true) ||
+                    tag.startsWith("research-topic:", ignoreCase = true)
+            } || entry.label.startsWith("[RESEARCH]", ignoreCase = true)
+        }.sortedByDescending { it.lastAccessed }.take(MAX_RESEARCH_FOLLOW_UPS)
+
+        return researchEntries.mapNotNull { entry ->
+            val label = SecretRedactor.redact(entry.label, 120)
+            val summary = SecretRedactor.redact(entry.content, 420)
+            if (
+                label.isBlank() ||
+                summary.isBlank() ||
+                SecretRedactor.containsSensitive(label + " " + summary)
+            ) return@mapNotNull null
+
+            val goal = "Refresh this saved research note using current reliable sources. " +
+                "Compare new information with the saved note and clearly identify what changed, " +
+                "what remains current, and any uncertainty. Saved topic: " + label +
+                ". Saved note: " + summary
+            ProactiveSuggestion(
+                type = SuggestionType.FOLLOW_UP,
+                title = "Refresh saved research: " + label.take(64),
+                description = "AURA found an explicitly tagged research note in local memory. " +
+                    "Would you like a current-source review of '" + label + "'?",
+                action = ProactiveAction(
+                    type = ActionType.START_RESEARCH,
+                    payload = mapOf("goal" to goal.take(MAX_RESEARCH_GOAL_CHARS)),
+                    requiresConfirmation = true
+                ),
+                confidence = 0.74,
+                priority = Priority.MEDIUM,
+                context = SuggestionContext(
+                    trigger = Trigger.MEMORY_PATTERN,
+                    relatedMemoryIds = listOf(entry.id)
+                ),
+                expiresAt = System.currentTimeMillis() + SUGGESTION_TTL_MS
+            )
+        }
     }
 
     private fun isRelevant(suggestion: ProactiveSuggestion, context: ConversationContext): Boolean {
@@ -1095,3 +1256,12 @@ interface ProactiveSuggestionPersistence {
     fun loadAgentStates(): List<ProactiveEngine.AgentState>
     fun saveAgentState(state: ProactiveEngine.AgentState)
 }
+
+private const val HABIT_LOOKBACK_DAYS = 30
+private const val MILLIS_PER_DAY = 24L * 60 * 60 * 1_000
+private const val MIN_PATTERN_EVENTS = 3
+private const val MIN_PATTERN_DAYS = 3
+private const val MAX_HABIT_SUGGESTIONS = 2
+private const val MAX_RESEARCH_FOLLOW_UPS = 2
+private const val MAX_RESEARCH_GOAL_CHARS = 2_000
+private const val SUGGESTION_TTL_MS = 24L * 60 * 60 * 1_000
