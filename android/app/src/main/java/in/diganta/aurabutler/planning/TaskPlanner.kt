@@ -410,6 +410,9 @@ class TaskPlanner(
         approved: Boolean,
         executionDetail: String
     ): Boolean {
+        // A WorkManager instance may have committed this plan in another process.
+        // Refresh before resolving its approval from the foreground ActionExecutor.
+        planStore.reload()
         val plan = planStore.get(planId) ?: return false
         val task = plan.tasks.firstOrNull { it.id == taskId } ?: return false
         if (task.status != TaskStatus.AWAITING_APPROVAL) return false
@@ -875,7 +878,21 @@ class PlanStore(
     private val versions = ConcurrentHashMap<String, MutableList<TaskPlanner.Plan>>()
 
     init {
-        persistence?.loadAll()?.forEach { state ->
+        reload()
+    }
+
+    /**
+     * Refresh committed state written by another Android runtime/WorkManager worker.
+     * SQLite is the source of truth; unsaved changes are never present because save()
+     * commits the durable state before publishing it to the in-memory maps.
+     */
+    @Synchronized
+    fun reload() {
+        val restored = persistence?.loadAll().orEmpty()
+            .take(MAX_PERSISTED_PLANS)
+        plans.clear()
+        versions.clear()
+        restored.forEach { state ->
             plans[state.current.id] = state.current
             versions[state.current.id] = state.history
                 .takeLast(MAX_HISTORY_PER_PLAN)
@@ -914,6 +931,10 @@ class PlanStore(
         versions.remove(id)
     }
 
+    fun close() {
+        (persistence as? java.io.Closeable)?.close()
+    }
+
     @Synchronized
     fun getActivePlans(): List<TaskPlanner.Plan> = plans.values
         .filter {
@@ -924,5 +945,6 @@ class PlanStore(
 
     private companion object {
         const val MAX_HISTORY_PER_PLAN = 10
+        const val MAX_PERSISTED_PLANS = 250
     }
 }
