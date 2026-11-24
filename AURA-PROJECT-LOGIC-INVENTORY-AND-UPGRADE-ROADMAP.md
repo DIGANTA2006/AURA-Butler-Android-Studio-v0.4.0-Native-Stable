@@ -349,3 +349,37 @@ The static pass found that keyless knowledge fallback and ViewModel chat/documen
 ## 10. Completion policy
 
 A subsystem is complete only when its source-level design, active call paths, settings/defaults, failure cases, unit tests, integration tests and relevant device behaviour have been verified. Report separately what is implemented, what is tested in CI, what is verified on physical hardware, and what remains unavailable or unverified.
+
+## 11. PR #3 implementation and verification status — 24 November 2026
+
+This section supersedes the Phase 2–5 implementation-gap bullets above where PR #3 now contains concrete code. It does not change the status of the merged `main` branch: all items below are on the open draft branch `feat/aura-cross-domain-completion-phase-2` until PR #3 is reviewed, validated and merged.
+
+### Implemented on the PR #3 branch
+
+- **Cancellation/lifecycle:** added explicit cancellation preservation through keyless knowledge fallback and the chat, document and private image-analysis ViewModel paths. Cancellation is rethrown instead of being converted into a fallback result or alternate-provider attempt.
+- **Phase 2 — ONNX semantic memory:** added a real ONNX Runtime sentence-embedding provider, WordPiece tokenizer, quantized MiniLM model/vocabulary download pinned to a fixed source revision and SHA-256 digests, bounded model download, verified installation marker, and AES-GCM/Android-Keystore encrypted SQLite storage for semantic memories and vectors. The live `ProductionButlerEngine` path reconciles the owner's private memories into the semantic store and uses hybrid retrieval when semantic memory is enabled. A further PR #3 fix synchronizes model download/cancellation with live settings changes; restart is not required.
+- **Phase 3 — planning:** added encrypted durable plan/checkpoint storage, reload support, a production Android planning composition root, and typed executors for live research, analysis, creation, verification, decisions, approval-gated actions, and communication drafts. Communication remains draft-only; the app does not claim to send messages. Side effects still require an explicit approval card.
+- **Phase 4 — proactive intelligence:** added encrypted persistence for suggestions and agent checkpoints, WorkManager scheduling/rehydration, local device/context agents, recurring-topic detection from user-authored AURA chat only, research follow-up from explicitly tagged local memories, notification handling and a production action gateway. The gateway routes external/device effects through the existing approval policy; arbitrary command execution from proactive suggestions is blocked.
+- **Phase 5 — production integration:** wired semantic retrieval into the active `ProductionButlerEngine` unresolved-request path; wired plan commands, plan approvals/resumption, proactive suggestions, approvals and encrypted proactive state into `ButlerViewModel`. `IntelligenceCoordinator` remains a separate legacy/orchestration class and is not the active chat composition root; do not count that class being present as proof that it is in the production call path.
+- **Live configuration correction:** enabling semantic memory after startup enqueues the verified model worker; disabling it cancels the unique pending model job. Both paths retain WorkManager's unmetered-network and battery-not-low constraints.
+
+### Validation boundary
+
+- The original PR #3 workflow run `45318149144` compiled Kotlin successfully and ran 182 unit tests, of which 179 passed and three failed in proactive-agent tests. Lint and APK assembly were skipped because the test task failed.
+- The three failing assertions were tied to the newer scheduled-agent behavior: habit detection is executed by the Habit Learning agent, disabled semantic consolidation is persisted as a disabled agent, and the Daily Briefing/Habit Learning/Research Follow-up agents are now enabled. Their tests were updated on the PR branch to exercise the agent execution path and assert the current enabled-agent contract.
+- The test updates and live semantic-memory settings correction are committed on the PR branch. **A passing rerun of the full workflow has not yet been verified.** The PR remains a draft and is not merged into `main`.
+- The ONNX tokenizer has unit coverage, but an actual downloaded model session, embedding output quality, encrypted Android Keystore/SQLite behavior, WorkManager recovery and plan-resume behavior still require device or integration acceptance. A successful Kotlin compilation alone does not validate those runtime paths.
+
+### Remaining work before production completion
+
+1. Obtain a fresh green PR workflow for the latest head: unit tests, Android lint and debug APK assembly. Fix any further failures rather than weakening assertions.
+2. Add or run Android integration tests against the actual SQLite/Keystore persistence adapters, verifying restart restoration, deletion, corruption handling, key invalidation and bounded retention.
+3. Run the pinned ONNX model on a supported ARM64 handset, validate model download/install/retry/cancellation, tensor compatibility, embedding dimension/finite values, semantic retrieval quality and memory/performance impact.
+4. Exercise complete task-plan flows on Android: create, execute, checkpoint, process death, restore, approval, rejection, expiry, resume, cancellation, retry and dependency failure. Verify every executor has honest outputs and idempotent side-effect boundaries.
+5. Exercise proactive WorkManager behavior across process death/reboot, duplicate scheduling, disabled settings, stale approvals, notification permission denial, retries and time-zone boundaries.
+6. Finish the blocking HTTP cancellation/connection-abort audit so cancellation does not leave synchronous sockets running until their read timeout.
+7. Complete physical-device voice acceptance on the target handset: full-duplex capture, AEC/NS effectiveness, TTS self-echo rejection, arbitrary-phrase barge-in, owner voice sensitivity, headset/speaker routing, latency, Piper fallback, long-session cleanup and false-trigger behavior.
+
+### Completion reporting
+
+Report these independently: implementation present on the PR branch; automated CI status for the exact latest commit; Android runtime/integration results; physical-device acceptance. Until each relevant item passes, the PR #3 upgrade must be described as implemented-in-progress, not fully production-complete.
