@@ -9,6 +9,14 @@ import `in`.diganta.aurabutler.data.HybridAiProvider
 import `in`.diganta.aurabutler.data.StructuredAgentProvider
 import `in`.diganta.aurabutler.maintenance.AuraDoctor
 import `in`.diganta.aurabutler.model.ButlerReply
+import `in`.diganta.aurabutler.model.MemoryItem
+import `in`.diganta.aurabutler.memory.EmbeddingModelFiles
+import `in`.diganta.aurabutler.memory.EncryptedSemanticMemoryPersistence
+import `in`.diganta.aurabutler.memory.MemoryStore
+import `in`.diganta.aurabutler.memory.OnnxSentenceEmbeddingProvider
+import `in`.diganta.aurabutler.memory.SemanticMemory
+import android.util.Log
+import java.io.File
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.runtime.ActionAuditLog
 import `in`.diganta.aurabutler.runtime.AuraRuntimeState
@@ -52,6 +60,96 @@ class ProductionButlerEngine(
     private val newsCommands by lazy { NewsCommandEngine(store) }
     private val commandInterpreter by lazy { GeminiCommandInterpreter() }
     private val structuredAgent by lazy { StructuredAgentProvider() }
+
+    @Volatile
+    private var semanticMemoryInstance: SemanticMemory? = null
+
+    private val semanticMemoryLock = Any()
+
+    private fun semanticMemoryOrNull(): SemanticMemory? {
+        semanticMemoryInstance?.let { return it }
+        if (!EmbeddingModelFiles.isInstalled(appContext)) return null
+        synchronized(semanticMemoryLock) {
+            semanticMemoryInstance?.let { return it }
+            val model = EmbeddingModelFiles.modelFile(appContext)
+            val vocabulary = EmbeddingModelFiles.vocabularyFile(appContext)
+            val provider = OnnxSentenceEmbeddingProvider(model, vocabulary)
+            return SemanticMemory(
+                aiProvider = null,
+                embeddingProvider = provider,
+                memoryStore = MemoryStore(
+                    persistence = EncryptedSemanticMemoryPersistence(appContext)
+                )
+            ).also { semanticMemoryInstance = it }
+        }
+    }
+
+    private suspend fun enrichWithSemanticMemory(
+        message: String,
+        context: ConversationContext
+    ): ConversationContext {
+        if (!context.settings.semanticMemoryEnabled || message.isBlank()) return context
+        val semantic = try {
+            semanticMemoryOrNull()
+        } catch (error: Exception) {
+            Log.w(TAG, "The local ONNX semantic-memory engine could not initialize.", error)
+            null
+        } ?: return context
+
+        return try {
+            val privateItems = withContext(Dispatchers.IO) { store.loadMemories() }
+            semantic.reconcilePrivateMemories(privateItems, context)
+            val recalled = semantic.recall(
+                query = message,
+                context = context,
+                options = SemanticMemory.RecallOptions(
+                    maxResults = 6,
+                    minScore = 0.18,
+                    semanticWeight = 0.82,
+                    strategy = SemanticMemory.RetrievalStrategy.HYBRID
+                )
+            )
+            val semanticItems = recalled.entries.map { scored ->
+                val entry = scored.entry
+                MemoryItem(
+                    id = entry.id,
+                    label = entry.label,
+                    value = entry.content,
+                    createdAtEpochMs = entry.createdAt
+                )
+            }
+            context.copy(
+                memories = (semanticItems + context.memories)
+                    .distinctBy(MemoryItem::id)
+                    .take(20)
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "Local semantic recall failed; AURA will use its encrypted lexical memory path.", error)
+            context
+        }
+    }
+
+    private suspend fun reconcileSemanticWrites(
+        writes: List<MemoryItem>,
+        context: ConversationContext
+    ) {
+        val semantic = try {
+            semanticMemoryOrNull()
+        } catch (error: Exception) {
+            Log.w(TAG, "The local semantic-memory engine could not initialize.", error)
+            null
+        } ?: return
+        try {
+            val completeMemoryList = withContext(Dispatchers.IO) { store.loadMemories() }
+            semantic.reconcilePrivateMemories(completeMemoryList, context)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w(TAG, "New private memories could not be indexed semantically.", error)
+        }
+    }
 
     suspend fun chat(
         message: String,
@@ -150,11 +248,17 @@ class ProductionButlerEngine(
                 }
             }
 
-            if (direct == null && shouldUseStructuredAgent(effectiveMessage, context)) {
+            val intelligenceContext = if (direct == null) {
+                enrichWithSemanticMemory(effectiveMessage, context)
+            } else {
+                context
+            }
+
+            if (direct == null && shouldUseStructuredAgent(effectiveMessage, intelligenceContext)) {
                 val agentStartedAt = SystemClock.elapsedRealtime()
                 direct = try {
                     withTimeoutOrNull(remainingTurnMs(turnDeadlineAt, AGENT_TIMEOUT_MS)) {
-                        runStructuredAgent(effectiveMessage, context)
+                        runStructuredAgent(effectiveMessage, intelligenceContext)
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -165,8 +269,9 @@ class ProductionButlerEngine(
             }
 
             val reply = direct ?: run {
-                val relevant = store.searchMemories(effectiveMessage, 10)
-                    .ifEmpty { context.memories.takeLast(4) }
+                val relevant = (
+                    store.searchMemories(effectiveMessage, 10) + intelligenceContext.memories
+                ).distinctBy(MemoryItem::id).take(10)
 
                 // Never send a likely secret to an optional provider. The
                 // deterministic local engine can still explain the restriction.
@@ -174,12 +279,12 @@ class ProductionButlerEngine(
                     SecretRedactor.containsLikelySecret(effectiveMessage) &&
                     route.intent in CLOUD_ELIGIBLE_INTENTS
                 ) {
-                    context.copy(
+                    intelligenceContext.copy(
                         memories = relevant,
-                        settings = context.settings.copy(aiEnabled = false)
+                        settings = intelligenceContext.settings.copy(aiEnabled = false)
                     )
                 } else {
-                    context.copy(memories = relevant)
+                    intelligenceContext.copy(memories = relevant)
                 }
 
                 val delegatedStartedAt = SystemClock.elapsedRealtime()
@@ -211,6 +316,13 @@ class ProductionButlerEngine(
                 )
             } else {
                 reply
+            }
+
+            if (
+                context.settings.semanticMemoryEnabled &&
+                resolvedReply.memoryWrites.isNotEmpty()
+            ) {
+                reconcileSemanticWrites(resolvedReply.memoryWrites, context)
             }
 
             val latency = SystemClock.elapsedRealtime() - startedAt
