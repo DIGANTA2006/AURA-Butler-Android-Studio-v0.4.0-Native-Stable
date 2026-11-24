@@ -9,6 +9,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.Closeable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -31,7 +32,7 @@ class EncryptedSemanticMemoryPersistence(
     DATABASE_NAME,
     null,
     DATABASE_VERSION
-), SemanticMemoryPersistence {
+), SemanticMemoryPersistence, Closeable {
 
     private val lock = Any()
     private val cipher = KeystoreCipher()
@@ -119,6 +120,12 @@ class EncryptedSemanticMemoryPersistence(
     override fun clear() {
         synchronized(lock) {
             writableDatabase.delete("semantic_memories", null, null)
+        }
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            super.close()
         }
     }
 
