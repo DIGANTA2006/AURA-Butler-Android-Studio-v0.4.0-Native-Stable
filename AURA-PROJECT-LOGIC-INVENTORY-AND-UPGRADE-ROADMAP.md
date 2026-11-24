@@ -310,13 +310,41 @@ This section records the repository changes made after the original source inven
 - `StudentBudgetConfig` defaults currently use zero/unlimited limits until a manifest supplies limits. Confirm that this is the intended deployment policy before enabling broad public-provider usage.
 - Physical Android acceptance remains outstanding for full-duplex capture, device AEC/NS effectiveness, sustained arbitrary-phrase barge-in, Piper fallback behaviour, long-session resource cleanup and false-trigger/echo performance. Code-path presence and emulator/CI success do not prove these acoustic behaviours on a handset.
 
-### Current Git and verification boundary
+### Git and verification boundary after merge
 
-- Working branch: `feat/aura-domain-logic-upgrade`.
-- Pull request: [#2](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/pull/2), still deliberately a draft and unmerged.
-- Base `main`: `ed97788c9d74d2377190cd47eb7150606aef6270`; no commits in this continuation were pushed to `main`.
-- Source inventory at this snapshot: **604 tracked files, 100 production Kotlin files, 34 Kotlin test/instrumentation files** (reconciled from the recursive branch tree).
-- Full Android CI passed on branch head `9881cdc636356030efc3ed38072a9c38a489393d`, run [#45229881956](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/actions/runs/45229881956): unit tests passed, Android lint passed, and `assembleDebug` passed. This validates the repository build and unit tests on the runner; it does not replace physical-device voice acceptance.
+- Pull request [#2](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/pull/2) was merged on **24 November 2026 at 01:37 UTC**.
+- Production `main` is merge commit `d1167ac9f334ae90d98faeae65b789bee92ecad8`.
+- The merged source inventory is **604 tracked files, 100 production Kotlin files and 34 Kotlin test/instrumentation files**, reconciled from the recursive `main` tree.
+- Post-merge Android CI [#45306443108](https://github.com/DIGANTA2006/AURA-Butler-Android-Studio-v0.4.0-Native-Stable/actions/runs/45306443108) passed on the merge commit: unit tests, Android lint and `assembleDebug` all succeeded. This is runner validation, not physical-device voice acceptance.
+
+## 9. Post-merge full-source audit and remaining implementation — 24 November 2026
+
+The merged `main` tree was re-enumerated and all **100 production Kotlin source files** were fetched for a source-level static pass. This completes the inventory/reconciliation step; it does **not** mean every logic file has been redesigned or individually rewritten.
+
+### Confirmed additional cancellation defects and follow-up patch
+
+The static pass found that keyless knowledge fallback and ViewModel chat/document/image-analysis error paths could convert coroutine cancellation into a fallback, error message or alternate-provider attempt. These paths have been corrected on the follow-up branch `feat/aura-cross-domain-completion-phase-2` using `runCatchingCancellable` and explicit `CancellationException` rethrows. This follow-up is not yet merged; it requires CI validation.
+
+### Remaining high-priority work — not complete
+
+1. **Semantic memory durability and genuine embeddings.** The live app's ordinary private memories and temporal history are persisted through `SecureStore` → `PrivateMemoryStore` / `TemporalMemoryStore`. The separate `SemanticMemory.MemoryStore` used by `IntelligenceCoordinator` is still process-local, and it is not backed by those durable stores. `LocalEmbeddingProvider` currently uses deterministic lexical feature hashing; the configured ONNX model path is not loaded. Actual ONNX inference, embedding-quality evaluation and durable semantic-index restoration remain unimplemented.
+2. **Durable task plans.** `PlanStore` is still an in-memory repository. Plan history and checkpoints do not survive process death.
+3. **Real task executors.** `TaskPlanner` has safe cancellation/state handling and honest result reporting, but research, device action, creation, verification, communication and decision task types do not have complete live executors. Unsupported task types fail rather than claim success.
+4. **Proactive action integration.** `ProactiveEngine` can generate and manage suggestions, but its action executor intentionally returns `false`. Suggestions cannot perform real actions until a reviewed executor is wired through the production approval, safety and audit path.
+5. **Advanced intelligence production wiring.** The running UI constructs `ProductionButlerEngine` around `LocalButlerEngine`. `IntelligenceCoordinator` and `EnhancedButlerEngine` remain a separate, non-production-wired path. Integrating them safely requires shared persistence, settings/context lifecycle, and tests that prove existing deterministic commands and approvals still win.
+6. **Voice hardware acceptance.** The code includes an AEC-gated natural-speech capture path plus wake-word fallback, but platform effect availability is not proof of effective echo cancellation. Test full-duplex capture, TTS self-echo rejection, owner speech sensitivity, latency, headset/speaker routing and Piper fallback on the target handset.
+7. **Blocking network interruption audit.** `SafeHttpClient` provides bounded synchronous HTTP calls. The remaining provider call sites need an explicit cancellation/connection-abort acceptance pass so a cancelled coroutine does not leave a blocking socket operation running until its read timeout.
+
+### Configuration decision, not a claimed defect
+
+`StudentBudgetConfig` deliberately documents zero daily limits as unlimited (“JARVIS MODE”). Confirm that this is still the intended owner policy before changing it; do not silently introduce artificial caps or treat the documented unlimited setting as an implementation defect.
+
+### Completion accounting
+
+- **Inventory and static source pass:** 100/100 production Kotlin files enumerated and scanned.
+- **PR #2 direct production-file touch count:** 17/100 files (17%). It also changed eight test files and the roadmap; shared changes such as `SafeHttpClient` and cancellation helpers affect multiple consumers, so this ratio is a direct-touch measure, not a feature-completion score.
+- **Automated build state on merged main:** green (unit tests + lint + debug APK).
+- **Overall request “upgrade every logic fully”:** **not complete**. The remaining work above is substantive engineering and hardware validation, not cosmetic cleanup.
 
 ## 10. Completion policy
 
