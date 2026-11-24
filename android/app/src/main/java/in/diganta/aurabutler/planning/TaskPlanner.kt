@@ -125,8 +125,20 @@ class TaskPlanner(
                 5. Whether it's a checkpoint (save state after)
                 6. Estimated duration
                 
-                Output as structured JSON array of tasks.
-            """.trimIndent(),
+                Return only a valid JSON array (no Markdown fences) with fields:
+                id (unique step-N string), title, description, type, dependencies (array of step IDs),
+                tool (optional), toolArguments (JSON object), checkpoint (boolean), and estimatedDurationMs.
+                Use only RESEARCH, ANALYSIS, EXECUTION, CREATION, VERIFICATION, COMMUNICATION, DECISION.
+                Research tools: web_search, news_search, get_weather, weather_forecast.
+                Execution tools may only be open_url, open_app, open_setting, dial_phone, map_route,
+                set_alarm, set_timer, draft_message, compose_email, share_text, set_volume,
+                set_brightness, flashlight, open_camera, set_reminder, clear_aura_cache,
+                cooling_assist. Device/external operations require explicit approval.
+                Never request shell commands, arbitrary code execution, payment, deletion outside AURA,
+                or sending a message automatically. Communication tasks create drafts only.
+                A decision task must specify operator, left, and right where required.
+                Verification must specify check and expected values where applicable.
+                """.trimIndent(),
             context = context,
             options = ReasoningEngine.ReasoningOptions(enableToolUse = false, enableReflection = true)
         )
@@ -514,46 +526,172 @@ class TaskPlanner(
         }
     }
 
-    private fun parseTasksFromReasoning(trace: List<ReasoningEngine.ReasoningStep>, finalAnswer: String): List<TaskNode> {
-        // Parse structured tasks from reasoning output
-        // In production, use JSON parsing from structured AI output
-        val tasks = mutableListOf<TaskNode>()
-        
-        // Simple fallback: create tasks from plan step
-        val planStep = trace.firstOrNull { it.type == ReasoningEngine.StepType.PLANNING }
-        if (planStep != null) {
-            val lines = planStep.content.lines()
-                .map { it.trim() }
-                .filter { Regex("^\\d+\\.\\s+.+$").matches(it) }
-                .map { it.replaceFirst(Regex("^\\d+\\.\\s*"), "").trim() }
-                .filter(String::isNotBlank)
-            
-            var previousId: String? = null
-            for ((index, line) in lines.withIndex()) {
-                val taskType = inferTaskType(line)
-                val task = TaskNode(
-                    title = line.take(60),
-                    description = line,
-                    type = taskType,
-                    dependencies = previousId?.let { listOf(it) } ?: emptyList(),
-                    checkpoint = (index == lines.lastIndex) || (index % 3 == 0),
-                    estimatedDurationMs = estimateDuration(taskType)
+    private fun parseTasksFromReasoning(
+        trace: List<ReasoningEngine.ReasoningStep>,
+        finalAnswer: String
+    ): List<TaskNode> {
+        val planningText = trace.firstOrNull {
+            it.type == ReasoningEngine.StepType.PLANNING
+        }?.content.orEmpty()
+        val structured = parseStructuredTasks(finalAnswer)
+            ?: parseStructuredTasks(planningText)
+        if (structured != null) {
+            buildDependencyGraph(structured)
+            topologicalSort(buildDependencyGraph(structured))
+            return structured
+        }
+
+        val numberedLines = planningText.lines()
+            .map(String::trim)
+            .filter { Regex("^\\d+\\.\\s+.+$").matches(it) }
+            .map { it.replaceFirst(Regex("^\\d+\\.\\s*"), "").trim() }
+            .filter(String::isNotBlank)
+            .take(MAX_PLAN_TASKS)
+
+        if (numberedLines.isEmpty()) {
+            return listOf(
+                TaskNode(
+                    title = "Analyze the requested goal",
+                    description = finalAnswer.take(1_000).ifBlank {
+                        "Analyze and break down the user's requested goal."
+                    },
+                    type = TaskType.ANALYSIS,
+                    checkpoint = true,
+                    estimatedDurationMs = estimateDuration(TaskType.ANALYSIS)
                 )
-                tasks.add(task)
-                previousId = task.id
+            )
+        }
+
+        var previousId: String? = null
+        val tasks = numberedLines.mapIndexed { index, line ->
+            val taskType = inferTaskType(line)
+            TaskNode(
+                title = line.take(80),
+                description = line.take(1_000),
+                type = taskType,
+                dependencies = previousId?.let(::listOf).orEmpty(),
+                checkpoint = index == numberedLines.lastIndex || index % 3 == 0,
+                estimatedDurationMs = estimateDuration(taskType)
+            ).also { previousId = it.id }
+        }
+        buildDependencyGraph(tasks)
+        topologicalSort(buildDependencyGraph(tasks))
+        return tasks
+    }
+
+    private fun parseStructuredTasks(source: String): List<TaskNode>? {
+        val start = source.indexOf('[')
+        val end = source.lastIndexOf(']')
+        if (start < 0 || end <= start) return null
+
+        return runCatching {
+            val array = JSONArray(source.substring(start, end + 1))
+            require(array.length() in 1..MAX_PLAN_TASKS) {
+                "The generated plan contains an invalid number of tasks."
+            }
+            val objects = (0 until array.length()).map { index ->
+                array.optJSONObject(index)
+                    ?: throw IllegalArgumentException("A generated plan task was not a JSON object.")
+            }
+            val ids = objects.mapIndexed { index, item ->
+                val externalId = item.optString("id").takeIf(String::isNotBlank)
+                    ?: "step-" + (index + 1)
+                externalId to UUID.randomUUID().toString()
+            }.toMap()
+            require(ids.size == objects.size) { "The generated plan contains duplicate task IDs." }
+
+            objects.mapIndexed { index, item ->
+                val title = item.optString("title").trim()
+                val description = item.optString("description").trim()
+                require(title.isNotBlank() && description.isNotBlank()) {
+                    "A generated plan task is missing its title or description."
+                }
+                val typeName = item.optString("type").uppercase()
+                val type = enumValues<TaskType>().firstOrNull { it.name == typeName }
+                    ?: inferTaskType(description)
+                val dependencyJson = item.optJSONArray("dependencies") ?: JSONArray()
+                val dependencies = buildList {
+                    for (dependencyIndex in 0 until dependencyJson.length()) {
+                        val dependency = dependencyJson.optString(dependencyIndex).trim()
+                        val mapped = ids[dependency]
+                            ?: dependency.toIntOrNull()?.let { oneBased ->
+                                ids.values.elementAtOrNull(oneBased - 1)
+                            }
+                        require(mapped != null) {
+                            "A generated plan task references an unknown dependency."
+                        }
+                        add(mapped)
+                    }
+                }.distinct()
+                val tool = item.optString("tool").trim().takeIf(String::isNotBlank)
+                val argsJson = item.optJSONObject("toolArguments") ?: JSONObject()
+                val args = jsonObjectToArguments(argsJson)
+                validateGeneratedTool(type, tool, args)
+                TaskNode(
+                    id = ids.values.elementAt(index),
+                    title = title.take(100),
+                    description = description.take(4_000),
+                    type = type,
+                    dependencies = dependencies,
+                    tool = tool,
+                    toolArguments = args,
+                    checkpoint = item.optBoolean("checkpoint", false),
+                    estimatedDurationMs = item.optLong(
+                        "estimatedDurationMs",
+                        estimateDuration(type)
+                    ).coerceIn(1_000L, MAX_TASK_DURATION_MS),
+                    maxRetries = item.optInt("maxRetries", 1).coerceIn(0, 2)
+                )
+            }
+        }.getOrNull()
+    }
+
+    private fun validateGeneratedTool(
+        type: TaskType,
+        tool: String?,
+        arguments: Map<String, Any>
+    ) {
+        if (tool == null) return
+        val allowed = when (type) {
+            TaskType.RESEARCH -> tool in setOf(
+                "web_search", "knowledge", "wikipedia", "search_wiki",
+                "news_search", "get_news", "news", "headlines",
+                "get_weather", "weather", "weather_forecast", "forecast"
+            )
+            TaskType.EXECUTION -> ProductionTaskExecutor.isSupportedAction(tool)
+            else -> true
+        }
+        require(allowed) {
+            "The generated task requested a tool that is not allowlisted: " + tool
+        }
+        require(arguments.size <= MAX_TASK_ARGUMENTS) {
+            "A generated task contains too many tool arguments."
+        }
+        require(arguments.keys.all { it.isNotBlank() && it.length <= 100 }) {
+            "A generated task contains an invalid tool-argument key."
+        }
+    }
+
+    private fun jsonObjectToArguments(json: JSONObject): Map<String, Any> =
+        buildMap {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = jsonToTaskValue(json.get(key))
+                if (value != null) put(key, value)
             }
         }
-        
-        return if (tasks.isEmpty()) {
-            // Default single task
-            listOf(TaskNode(
-                title = "Execute goal",
-                description = finalAnswer.take(200),
-                type = TaskType.EXECUTION
-            ))
-        } else {
-            tasks
+
+    private fun jsonToTaskValue(value: Any): Any? = when (value) {
+        JSONObject.NULL -> null
+        is JSONObject -> jsonObjectToArguments(value)
+        is JSONArray -> buildList {
+            for (index in 0 until minOf(value.length(), MAX_TASK_ARGUMENTS)) {
+                jsonToTaskValue(value.get(index))?.let(::add)
+            }
         }
+        is String, is Boolean, is Number -> value
+        else -> throw IllegalArgumentException("Unsupported generated task argument value.")
     }
 
     private fun String.containsAny(vararg values: String): Boolean =
@@ -671,6 +809,9 @@ class TaskPlanner(
 
     private companion object {
         const val MAX_TASK_RESULT_CHARS = 12_000
+        const val MAX_PLAN_TASKS = 50
+        const val MAX_TASK_ARGUMENTS = 50
+        const val MAX_TASK_DURATION_MS = 24L * 60 * 60 * 1_000
     }
 
     private data class TaskExecutionResult(
