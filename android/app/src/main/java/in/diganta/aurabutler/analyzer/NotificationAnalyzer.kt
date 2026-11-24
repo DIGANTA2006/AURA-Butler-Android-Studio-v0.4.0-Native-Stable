@@ -6,6 +6,7 @@ import `in`.diganta.aurabutler.data.GeminiAnalyzerProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -90,7 +91,7 @@ class NotificationAnalyzer(
                 HybridAiProvider.PROVIDER_GEMINI
             )
         ) {
-            runCatching {
+            runCatchingCancellable {
                 val cloudItems = items.map { item ->
                     GeminiAnalyzerProvider.NotificationItem(
                         appName = item.appName,

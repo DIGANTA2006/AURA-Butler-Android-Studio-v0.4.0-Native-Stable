@@ -40,6 +40,38 @@ class AdaptiveSpeechDetectorTest {
     }
 
     @Test
+    fun `rejects isolated bursts before accepting sustained barge-in speech`() {
+        val detector = AdaptiveSpeechDetector(
+            sampleRate = 16_000,
+            minimumThreshold = 0.0085f,
+            maximumThreshold = 0.065f,
+            noiseMultiplier = 3.1f,
+            startSpeechMs = 360,
+            endSilenceMs = 720,
+            initialWaitMs = 90_000,
+            calibrationMs = 320
+        )
+
+        // Calibrate against the active speaker path after AEC is attached.
+        repeat(4) { detector.observe(0.003f, 1_280) }
+
+        // A short echo/transient must not cross the 360ms speech-start window.
+        detector.observe(0.030f, 1_280)
+        repeat(2) { detector.observe(0.003f, 1_280) }
+        assertFalse(detector.heardSpeech)
+
+        // Five sustained 80ms windows meet the configured start duration.
+        repeat(5) { detector.observe(0.030f, 1_280) }
+        assertTrue(detector.heardSpeech)
+
+        var decision = AdaptiveSpeechDetector.Decision.CONTINUE
+        repeat(9) {
+            decision = detector.observe(0.002f, 1_280)
+        }
+        assertEquals(AdaptiveSpeechDetector.Decision.END_OF_SPEECH, decision)
+    }
+
+    @Test
     fun `times out cleanly when no speech arrives`() {
         val detector = AdaptiveSpeechDetector(
             sampleRate = 16_000,

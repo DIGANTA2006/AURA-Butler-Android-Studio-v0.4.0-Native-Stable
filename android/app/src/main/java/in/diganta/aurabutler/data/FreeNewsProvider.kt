@@ -1,6 +1,7 @@
 package `in`.diganta.aurabutler.data
 
 import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -54,7 +55,7 @@ class FreeNewsProvider {
         val key = settings.gnewsApiKey.trim()
 
         if (key.isNotBlank()) {
-            val apiResult = runCatching {
+            val apiResult = runCatchingCancellable {
                 fetchFromGNews(
                     apiKey = key,
                     topic = topic,

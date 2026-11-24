@@ -8,6 +8,7 @@ import `in`.diganta.aurabutler.model.ButlerAction
 import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.time.Duration
@@ -18,6 +19,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import java.util.UUID
 
 class LocalButlerEngine(
@@ -119,7 +121,7 @@ class LocalButlerEngine(
         if (lower.containsAny("weather", "temperature", "forecast", "আবহাওয়া", "মৌসম", "मौसम")) {
             val requestedLocation = weatherLocation(request)
             val forecastDays = ForecastDayParser.parse(request)
-            return runCatching {
+            return runCatchingCancellable {
                 if (forecastDays != null) {
                     liveInfo.weatherForecast(
                         settings = context.settings,
@@ -147,7 +149,7 @@ class LocalButlerEngine(
 
         if (lower.containsAny("news", "headlines", "খবর", "समाचार")) {
             val topic = newsTopic(request)
-            return runCatching { liveInfo.headlinesFor(5, topic) }
+            return runCatchingCancellable { liveInfo.headlinesFor(5, topic) }
                 .fold(
                     onSuccess = { headlines ->
                         if (headlines.isEmpty()) {
@@ -253,21 +255,26 @@ class LocalButlerEngine(
 
         if (isKnowledgeRequest(lower)) {
             val topic = knowledgeTopic(request)
-            return runCatching { liveInfo.knowledge(topic) }
-                .fold(
-                    onSuccess = { answer ->
-                        if (answer.isNullOrBlank()) {
-                            knowledgeSearch(topic)
-                        } else {
-                            Part(answer)
-                        }
-                    },
-                    onFailure = { knowledgeSearch(topic) }
-                )
+            val answer = try {
+                liveInfo.knowledge(topic)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            return if (answer.isNullOrBlank()) {
+                knowledgeSearch(topic)
+            } else {
+                Part(answer)
+            }
         }
 
-        val aiAttempt = runCatching {
-            generalAi?.answerStreaming(request, context, onPartial)
+        val aiAttempt = try {
+            Result.success(generalAi?.answerStreaming(request, context, onPartial))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
         }
 
         aiAttempt.getOrNull()

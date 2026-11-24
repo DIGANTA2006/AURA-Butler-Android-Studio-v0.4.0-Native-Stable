@@ -3,6 +3,7 @@ package `in`.diganta.aurabutler.domain
 import `in`.diganta.aurabutler.model.ActionKind
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -58,6 +59,50 @@ class LocalButlerEngineTest {
 
         assertTrue(reply.assistantMessage.contains("clear skies"))
         assertTrue(reply.pendingActions.isEmpty())
+    }
+
+    @Test
+    fun weatherLookupPropagatesCallerCancellation() = runBlocking {
+        val cancellingLive = object : LiveInfoProvider {
+            override suspend fun weather(settings: ButlerSettings): String {
+                throw CancellationException("weather cancelled by caller")
+            }
+
+            override suspend fun headlines(limit: Int): List<String> = emptyList()
+        }
+
+        val error = runCatching {
+            LocalButlerEngine(cancellingLive).chat("What is the weather?", context)
+        }.exceptionOrNull()
+
+        assertTrue(error is CancellationException)
+        assertEquals("weather cancelled by caller", error?.message)
+    }
+
+    @Test
+    fun newsLookupPropagatesCallerCancellation() = runBlocking {
+        var headlineCalls = 0
+        val cancellingLive = object : LiveInfoProvider {
+            override suspend fun weather(settings: ButlerSettings): String = "Clear."
+
+            override suspend fun headlines(limit: Int): List<String> = emptyList()
+
+            override suspend fun headlinesFor(limit: Int, topic: String?): List<String> {
+                headlineCalls++
+                throw CancellationException("news cancelled by caller")
+            }
+        }
+
+        var propagated = false
+        try {
+            LocalButlerEngine(cancellingLive).chat("Tell me the headlines", context)
+        } catch (cancelled: CancellationException) {
+            propagated = true
+            assertEquals("news cancelled by caller", cancelled.message)
+        }
+
+        assertEquals(1, headlineCalls)
+        assertTrue("The live news cancellation must reach the caller.", propagated)
     }
 
     @Test

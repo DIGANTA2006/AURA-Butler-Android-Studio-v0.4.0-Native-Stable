@@ -200,7 +200,9 @@ object StudentBudgetGuard {
                 return
             }
             initializationJob = initializationScope.launch {
-                runCatching { StudentBudgetConfig.initialize(app) }
+                // Preserve structured cancellation; a stopped app scope must not
+                // turn CancellationException into an ordinary config failure.
+                runCatchingCancellable { StudentBudgetConfig.initialize(app) }
             }
         }
     }

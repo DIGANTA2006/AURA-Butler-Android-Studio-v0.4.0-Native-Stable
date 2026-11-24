@@ -4,11 +4,14 @@ import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.runtime.SecretRedactor
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -121,20 +124,44 @@ class SemanticMemory(
         context: ConversationContext,
         options: RecallOptions = RecallOptions()
     ): RetrievalResult = withContext(Dispatchers.IO) {
+        require(query.isNotBlank()) { "Memory recall query cannot be blank." }
         val allEntries = memoryStore.getAll()
-        val queryEmbedding = embeddingProvider.embed(query)
-        
-        val scored = allEntries.mapNotNull { entry ->
-            entry.embedding?.let { emb ->
-                val similarity = cosineSimilarity(queryEmbedding, emb)
-                val relevance = calculateRelevance(entry, query, context, options)
-                val combined = (similarity * options.semanticWeight) + (relevance * (1 - options.semanticWeight))
-                
-                ScoredMemory(entry, similarity, relevance, combined)
+        val requestedTimeRange = options.timeRange
+        if (
+            requestedTimeRange != null &&
+            requestedTimeRange.start > requestedTimeRange.end
+        ) {
+            return@withContext RetrievalResult(
+                entries = emptyList(),
+                query = query,
+                strategy = options.strategy,
+                totalCandidates = allEntries.size
+            )
+        }
+        val queryEmbedding = embeddingProvider.embed(query.take(MAX_QUERY_CHARS))
+        val maxResults = options.maxResults.coerceIn(1, MAX_RECALL_RESULTS)
+        val minScore = options.minScore.coerceIn(0.0, 1.0)
+        val semanticWeight = options.semanticWeight.coerceIn(0.0, 1.0)
+
+        val scored = allEntries.asSequence()
+            .filter { entry ->
+                requestedTimeRange == null ||
+                    entry.createdAt in requestedTimeRange.start..requestedTimeRange.end
             }
-        }.filter { it.combinedScore >= options.minScore }
+            .mapNotNull { entry ->
+                entry.embedding?.let { embedding ->
+                    if (embedding.size != queryEmbedding.size) return@mapNotNull null
+                    val similarity = cosineSimilarity(queryEmbedding, embedding)
+                    val relevance = calculateRelevance(entry, query, context, options)
+                    val combined = (similarity * semanticWeight) +
+                        (relevance * (1.0 - semanticWeight))
+                    ScoredMemory(entry, similarity, relevance, combined)
+                }
+            }
+            .filter { it.combinedScore >= minScore }
             .sortedByDescending { it.combinedScore }
-            .take(options.maxResults)
+            .take(maxResults)
+            .toList()
         
         // Apply strategy-specific re-ranking
         val finalResults = applyStrategy(scored, query, context, options.strategy)
@@ -239,6 +266,8 @@ class SemanticMemory(
         return try {
             val response = aiProvider!!.answer(prompt, context)
             parseMetadataResponse(response ?: "")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             extractMetadataHeuristic(content)
         }
@@ -433,29 +462,40 @@ class SemanticMemory(
         )
     }
 
-    private data class PatternResult(
+    internal data class PatternResult(
         val patternsFound: Int,
         val conceptsCreated: Int,
         val errors: List<String>
     )
 
+    internal data class PatternCandidate(
+        val theme: String,
+        val memoryIds: Set<String>,
+        val confidence: Double
+    )
+
+    internal data class ConceptCandidate(
+        val name: String,
+        val description: String,
+        val relatedMemoryIds: Set<String>
+    )
+
     private suspend fun extractPatterns(entries: List<MemoryEntry>): PatternResult {
-        // Group by temporal proximity and entities
-        val recentEntries = entries.filter { 
-            (System.currentTimeMillis() - it.createdAt) < 30L * 24 * 3600 * 1000 // Last 30 days
+        val recentEntries = entries.filter {
+            (System.currentTimeMillis() - it.createdAt) < 30L * 24 * 3600 * 1000
         }
-        
+
         if (recentEntries.size < 5) return PatternResult(0, 0, emptyList())
-        
+
         val prompt = """
             Analyze these memory entries and identify:
             1. Recurring themes/topics (patterns)
             2. Higher-level concepts that unite multiple memories
             3. Contradictions or updates to previous information
-            
+
             Memories:
             ${recentEntries.take(50).joinToString("\n") { "- ${it.label}: ${it.content.take(200)}" }}
-            
+
             Return JSON:
             {
               "patterns": [{"theme": "...", "memoryIds": [...], "confidence": 0.0-1.0}],
@@ -463,18 +503,171 @@ class SemanticMemory(
               "contradictions": [{"old": "...", "new": "...", "memoryIds": [...]}]
             }
         """.trimIndent()
-        
+
         return try {
             val response = aiProvider!!.answer(prompt, ConversationContext.empty())
             parsePatternResponse(response ?: "", recentEntries)
-        } catch (e: Exception) {
-            PatternResult(0, 0, listOf(e.message ?: "Pattern extraction failed"))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            PatternResult(0, 0, listOf(error.message ?: "Pattern extraction failed"))
         }
     }
 
-    private fun parsePatternResponse(response: String, entries: List<MemoryEntry>): PatternResult {
-        // Simplified - in production, parse JSON and create concept memories
-        return PatternResult(0, 0, emptyList())
+    private fun parsePatternResponse(
+        response: String,
+        entries: List<MemoryEntry>
+    ): PatternResult {
+        val jsonStart = response.indexOf('{')
+        val jsonEnd = response.lastIndexOf('}')
+        if (jsonStart < 0 || jsonEnd <= jsonStart) {
+            return PatternResult(0, 0, listOf("Pattern analysis returned no JSON object."))
+        }
+
+        val root = runCatching {
+            org.json.JSONObject(response.substring(jsonStart, jsonEnd + 1))
+        }.getOrElse {
+            return PatternResult(0, 0, listOf("Pattern analysis returned malformed JSON."))
+        }
+
+        val allowedIds = entries.mapTo(mutableSetOf()) { it.id }
+        val patternArray = root.optJSONArray("patterns")
+        val patterns = buildList {
+            if (patternArray != null) {
+                for (index in 0 until minOf(patternArray.length(), MAX_PARSED_PATTERNS)) {
+                    val item = patternArray.optJSONObject(index) ?: continue
+                    add(
+                        PatternCandidate(
+                            theme = item.optString("theme").trim(),
+                            memoryIds = readValidatedIds(item.optJSONArray("memoryIds"), allowedIds),
+                            confidence = item.optDouble("confidence", 0.0)
+                        )
+                    )
+                }
+            }
+        }
+
+        val conceptArray = root.optJSONArray("concepts")
+        val concepts = buildList {
+            if (conceptArray != null) {
+                for (index in 0 until minOf(conceptArray.length(), MAX_CREATED_CONCEPTS)) {
+                    val item = conceptArray.optJSONObject(index) ?: continue
+                    add(
+                        ConceptCandidate(
+                            name = item.optString("name").trim(),
+                            description = item.optString("description").trim(),
+                            relatedMemoryIds = readValidatedIds(
+                                item.optJSONArray("relatedMemoryIds"),
+                                allowedIds
+                            )
+                        )
+                    )
+                }
+            }
+        }
+
+        return validateAndStorePatterns(patterns, concepts, entries)
+    }
+
+    /**
+     * Deterministic validation/storage stage, independent of Android's org.json
+     * runtime so it can be exercised by local JVM unit tests.
+     */
+    internal fun validateAndStorePatterns(
+        proposedPatterns: List<PatternCandidate>,
+        proposedConcepts: List<ConceptCandidate>,
+        entries: List<MemoryEntry>
+    ): PatternResult {
+        val allowedEntries = entries.associateBy { it.id }
+        var validPatterns = 0
+
+        proposedPatterns.take(MAX_PARSED_PATTERNS).forEach { candidate ->
+            val theme = SecretRedactor.redact(
+                candidate.theme.trim(),
+                MAX_CONCEPT_NAME_CHARS
+            ).trim()
+            val ids = candidate.memoryIds.intersect(allowedEntries.keys)
+            val confidence = candidate.confidence.coerceIn(0.0, 1.0)
+            if (
+                theme.isNotBlank() &&
+                ids.size >= MIN_CONCEPT_MEMORY_LINKS &&
+                confidence >= MIN_PATTERN_CONFIDENCE
+            ) {
+                validPatterns++
+            }
+        }
+
+        var conceptsCreated = 0
+        val existingConcepts = memoryStore.getAll()
+            .map { it.label.lowercase(Locale.ROOT) }
+            .toMutableSet()
+
+        proposedConcepts.take(MAX_CREATED_CONCEPTS).forEach { candidate ->
+            val name = SecretRedactor.redact(
+                candidate.name.trim(),
+                MAX_CONCEPT_NAME_CHARS
+            ).trim()
+            val description = SecretRedactor.redact(
+                candidate.description.trim(),
+                MAX_CONCEPT_DESCRIPTION_CHARS
+            ).trim()
+            val ids = candidate.relatedMemoryIds.intersect(allowedEntries.keys)
+            val label = "Concept: $name"
+
+            if (
+                name.length !in MIN_CONCEPT_NAME_CHARS..MAX_CONCEPT_NAME_CHARS ||
+                description.length < MIN_CONCEPT_DESCRIPTION_CHARS ||
+                ids.size < MIN_CONCEPT_MEMORY_LINKS ||
+                SecretRedactor.containsSensitive("$name\n$description") ||
+                label.lowercase(Locale.ROOT) in existingConcepts
+            ) {
+                return@forEach
+            }
+
+            val relatedEntries = ids.mapNotNull(allowedEntries::get)
+            val safeContent = buildString {
+                append(description)
+                append("\n\nSupported by memories: ")
+                append(relatedEntries.joinToString("; ") { it.label.take(80) })
+            }.take(MAX_CONCEPT_DESCRIPTION_CHARS + 500)
+            if (SecretRedactor.containsSensitive(safeContent)) return@forEach
+
+            val concept = MemoryEntry(
+                content = safeContent,
+                label = label,
+                embedding = embeddingProvider.embed(safeContent),
+                metadata = MemoryMetadata(
+                    relatedEntities = relatedEntries.map { it.label }.distinct().take(10),
+                    confidence = CONCEPT_MEMORY_CONFIDENCE
+                ),
+                importance = CONCEPT_MEMORY_IMPORTANCE,
+                tags = setOf("consolidated", "concept"),
+                source = MemorySource.CONSOLIDATED
+            )
+            memoryStore.save(concept)
+            existingConcepts += label.lowercase(Locale.ROOT)
+            conceptsCreated++
+        }
+
+        val errors = if (validPatterns == 0 && conceptsCreated == 0) {
+            listOf("No pattern or concept passed the validation requirements.")
+        } else {
+            emptyList()
+        }
+        return PatternResult(validPatterns, conceptsCreated, errors)
+    }
+
+    private fun readValidatedIds(
+        array: org.json.JSONArray?,
+        allowedIds: Set<String>
+    ): Set<String> {
+        if (array == null) return emptySet()
+        return buildSet {
+            for (index in 0 until minOf(array.length(), MAX_PATTERN_REFERENCES)) {
+                val id = array.optString(index).trim()
+                if (id.isNotBlank() && id in allowedIds) add(id)
+            }
+        }
     }
 
     private fun applyForgettingCurve(entries: List<MemoryEntry>): Int {
@@ -515,7 +708,7 @@ class SemanticMemory(
             if (count == lastScheduledConsolidationCount) return
             lastScheduledConsolidationCount = count
             maintenanceScope.launch {
-                runCatching { consolidate() }
+                runCatchingCancellable { consolidate() }
             }
         }
     }
@@ -558,6 +751,22 @@ class SemanticMemory(
         val sourceDistribution: Map<MemorySource, Int>,
         val storageSizeEstimate: Long
     )
+
+    private companion object {
+        const val MAX_QUERY_CHARS = 2_000
+        const val MAX_RECALL_RESULTS = 100
+        const val MAX_PARSED_PATTERNS = 20
+        const val MAX_CREATED_CONCEPTS = 8
+        const val MAX_PATTERN_REFERENCES = 20
+        const val MIN_CONCEPT_MEMORY_LINKS = 2
+        const val MIN_PATTERN_CONFIDENCE = 0.55
+        const val MIN_CONCEPT_NAME_CHARS = 3
+        const val MAX_CONCEPT_NAME_CHARS = 100
+        const val MIN_CONCEPT_DESCRIPTION_CHARS = 12
+        const val MAX_CONCEPT_DESCRIPTION_CHARS = 800
+        const val CONCEPT_MEMORY_CONFIDENCE = 0.65
+        const val CONCEPT_MEMORY_IMPORTANCE = 0.65
+    }
 }
 
 /**
@@ -569,51 +778,91 @@ interface EmbeddingProvider {
 }
 
 /**
- * Temporary deterministic hash embedding used as a compile-safe fallback.
- * This is not ONNX inference and does not provide semantic-quality embeddings.
+ * Deterministic local feature-hash vectors. These are lexical features, not
+ * neural embeddings; the configured ONNX model path is not loaded here.
  */
 class LocalEmbeddingProvider(
     private val modelPath: String
 ) : EmbeddingProvider {
-    override val dimension: Int = 384  // all-MiniLM-L6-v2 dimension
-    
-    override fun embed(text: String): FloatArray {
-        // The configured modelPath is not loaded by this implementation.
-        // Return a deterministic placeholder vector so callers can be tested,
-        // but do not treat it as semantic model inference.
-        return generatePseudoEmbedding(text)
-    }
-    
-    internal fun generatePseudoEmbedding(text: String): FloatArray {
-        val embedding = FloatArray(dimension)
-        val random = java.util.Random(text.hashCode().toLong())
-        for (i in embedding.indices) {
-            embedding[i] = (random.nextGaussian().toFloat() * 0.1f).coerceIn(-1f, 1f)
-        }
-        // Normalize in double precision, then store unit-length Float values.
-        val norm = kotlin.math.sqrt(embedding.sumOf { value -> value.toDouble() * value.toDouble() })
-        if (norm > 1e-12) {
-            for (i in embedding.indices) {
-                embedding[i] = (embedding[i].toDouble() / norm).toFloat()
-            }
-        }
-        return embedding
-    }
+    override val dimension: Int = 384
+    val isModelBacked: Boolean = false
+    val backendDescription: String =
+        "Local hashed lexical features; no ONNX model is loaded."
+
+    override fun embed(text: String): FloatArray =
+        HashedTextVectorizer.embed(text, dimension)
+
+    internal fun generatePseudoEmbedding(text: String): FloatArray = embed(text)
 }
 
 /**
- * Remote embedding provider (OpenAI-compatible / Modal).
+ * Compatibility placeholder only. No request is sent to the configured endpoint.
+ * Kept temporarily so old call sites cannot mistake remote inference for a feature.
  */
+@Deprecated(
+    message = "Remote embedding HTTP calls are not implemented; this is a local feature-hash fallback."
+)
 class RemoteEmbeddingProvider(
     private val endpoint: String,
     private val apiKey: String,
     private val model: String = "text-embedding-3-small"
 ) : EmbeddingProvider {
-    override val dimension: Int = 1536  // text-embedding-3-small
-    
-    override fun embed(text: String): FloatArray {
-        // Placeholder - in production, make HTTP request
-        return LocalEmbeddingProvider("").generatePseudoEmbedding(text)
+    override val dimension: Int = 1536
+    val isRemote: Boolean = false
+
+    override fun embed(text: String): FloatArray =
+        HashedTextVectorizer.embed(text, dimension)
+}
+
+/** Signed feature hashing across bounded token, phrase and character features. */
+private object HashedTextVectorizer {
+    private const val MAX_INPUT_CHARS = 6_000
+    private const val MAX_TOKENS = 500
+
+    fun embed(text: String, dimension: Int): FloatArray {
+        require(dimension > 0) { "Feature vector dimension must be positive." }
+        val vector = FloatArray(dimension)
+        val normalized = text.lowercase(Locale.ROOT)
+            .replace(Regex("""[^\p{L}\p{N}]+"""), " ")
+            .trim()
+            .take(MAX_INPUT_CHARS)
+        if (normalized.isBlank()) return vector
+
+        val words = normalized.split(' ')
+            .asSequence()
+            .filter { it.length >= 2 }
+            .take(MAX_TOKENS)
+            .toList()
+
+        words.forEach { word ->
+            addFeature(vector, "w:$word", 1.0)
+            val padded = "^$word$"
+            if (padded.length >= 3) {
+                for (index in 0..padded.length - 3) {
+                    addFeature(vector, "c:${padded.substring(index, index + 3)}", 0.18)
+                }
+            }
+        }
+        for (index in 0 until words.lastIndex) {
+            addFeature(vector, "b:${words[index]}:${words[index + 1]}", 0.45)
+        }
+
+        val norm = kotlin.math.sqrt(
+            vector.sumOf { value -> value.toDouble() * value.toDouble() }
+        )
+        if (norm > 1e-12) {
+            for (index in vector.indices) {
+                vector[index] = (vector[index].toDouble() / norm).toFloat()
+            }
+        }
+        return vector
+    }
+
+    private fun addFeature(vector: FloatArray, feature: String, weight: Double) {
+        val hash = feature.hashCode()
+        val index = (hash and Int.MAX_VALUE) % vector.size
+        val sign = if (hash < 0) -1.0 else 1.0
+        vector[index] = (vector[index] + sign * weight).toFloat()
     }
 }
 
@@ -622,39 +871,86 @@ class RemoteEmbeddingProvider(
  * Entries are lost when the process exits; encrypted persistent integration
  * with PrivateMemoryStore remains a separate implementation task.
  */
-class MemoryStore {
-    private val memories = ConcurrentHashMap<String, SemanticMemory.MemoryEntry>()
-    private val accessOrder = ConcurrentHashMap<String, Long>()
-    
+class MemoryStore(
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES
+) {
+    private val memories = mutableMapOf<String, SemanticMemory.MemoryEntry>()
+    private val accessOrder = mutableMapOf<String, Long>()
+    private var accessSequence = 0L
+
+    init {
+        require(maxEntries > 0) { "MemoryStore capacity must be positive." }
+    }
+
+    @Synchronized
     fun save(entry: SemanticMemory.MemoryEntry) {
         memories[entry.id] = entry
-        accessOrder[entry.id] = System.currentTimeMillis()
+        touch(entry.id)
+        evictLeastRecentlyUsed()
     }
-    
-    fun get(id: String): SemanticMemory.MemoryEntry? = memories[id]
-    
+
+    @Synchronized
+    fun get(id: String): SemanticMemory.MemoryEntry? {
+        val entry = memories[id] ?: return null
+        touch(id)
+        return entry
+    }
+
+    @Synchronized
     fun getAll(): List<SemanticMemory.MemoryEntry> = memories.values.toList()
-    
+
+    @Synchronized
     fun updateAccess(id: String) {
         memories[id]?.let { entry ->
-            val updated = entry.copy(
+            memories[id] = entry.copy(
                 accessCount = entry.accessCount + 1,
                 lastAccessed = System.currentTimeMillis()
             )
-            memories[id] = updated
-            accessOrder[id] = System.currentTimeMillis()
+            touch(id)
         }
     }
-    
+
+    @Synchronized
     fun delete(id: String) {
         memories.remove(id)
         accessOrder.remove(id)
     }
-    
+
+    @Synchronized
     fun clear() {
         memories.clear()
         accessOrder.clear()
+        accessSequence = 0L
     }
-    
+
+    @Synchronized
     fun size(): Int = memories.size
+
+    private fun touch(id: String) {
+        // Rebase before overflow while preserving access order.
+        if (accessSequence == Long.MAX_VALUE) {
+            val ordered = accessOrder.entries.sortedBy { it.value }
+            accessOrder.clear()
+            ordered.forEachIndexed { index, entry ->
+                accessOrder[entry.key] = index.toLong() + 1L
+            }
+            accessSequence = ordered.size.toLong()
+        }
+        accessSequence++
+        accessOrder[id] = accessSequence
+    }
+
+    private fun evictLeastRecentlyUsed() {
+        while (memories.size > maxEntries) {
+            val oldestId = accessOrder.minByOrNull { it.value }?.key
+                ?: memories.keys.firstOrNull()
+                ?: return
+            memories.remove(oldestId)
+            accessOrder.remove(oldestId)
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_MAX_ENTRIES = 2_000
+    }
 }

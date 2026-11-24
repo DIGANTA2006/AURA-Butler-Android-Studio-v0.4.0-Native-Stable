@@ -2,18 +2,32 @@ package `in`.diganta.aurabutler.data
 
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
-import `in`.diganta.aurabutler.runtime.AiWorkload
-import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
+import `in`.diganta.aurabutler.runtime.SecretRedactor
 import java.io.IOException
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 
-/** Private-Qwen-first optional AI router with explicit public-provider consent. */
+/**
+ * Privacy-aware optional AI router.
+ *
+ * Each concrete provider owns its own budget lease. The router never reserves
+ * a second quota unit around Gemini/Groq/private-Qwen calls.
+ */
 class HybridAiProvider(
     private val local: AiProvider = OpenAiCompatibleProvider(),
     private val gemini: AiProvider = GeminiAiProvider(),
     private val groq: AiProvider = GroqAiProvider()
 ) : AiProvider {
+    private val circuitBreakers = mapOf(
+        PROVIDER_LOCAL to ProviderCircuitBreaker(),
+        PROVIDER_GEMINI to ProviderCircuitBreaker(),
+        PROVIDER_GROQ to ProviderCircuitBreaker()
+    )
+
     override suspend fun answer(
         message: String,
         context: ConversationContext
@@ -25,9 +39,7 @@ class HybridAiProvider(
         message: String,
         context: ConversationContext,
         onDelta: (String) -> Unit
-    ): String? = runProviders(message, context) { provider ->
-        provider.answerStreaming(message, context, onDelta)
-    }
+    ): String? = runStreamingProviders(message, context, onDelta)
 
     private suspend fun runProviders(
         message: String,
@@ -41,43 +53,37 @@ class HybridAiProvider(
 
         val errors = mutableListOf<String>()
         for (candidate in candidates) {
-            if (isCoolingDown(candidate)) {
-                errors += "${displayName(candidate)}: temporarily skipped after a recent quota/rate-limit failure"
+            val circuit = circuitBreakers.getValue(candidate)
+            if (!circuit.tryAcquire()) {
+                errors += displayName(candidate) + ": temporarily unavailable; " +
+                    "retry window " + circuit.remainingSeconds() + "s"
                 continue
             }
 
-            val provider = when (candidate) {
-                PROVIDER_LOCAL -> local
-                PROVIDER_GEMINI -> gemini
-                PROVIDER_GROQ -> groq
-                else -> continue
-            }
-
-            val lease = StudentBudgetGuard.tryReserve(
-                workload = AiWorkload.TEXT,
-                endpoint = meteredEndpoint(candidate, settings)
-            )
-            if (!lease.allowed) {
-                errors += "${displayName(candidate)}: ${lease.message}"
-                continue
-            }
-
+            val provider = providerFor(candidate)
             try {
-                val result = call(provider)?.takeIf(String::isNotBlank)
+                val result = withTimeout(timeoutFor(candidate)) {
+                    call(provider)?.takeIf(String::isNotBlank)
+                }
                 if (result != null) {
-                    StudentBudgetGuard.commit(lease)
+                    circuit.recordSuccess()
                     return result
                 }
-                StudentBudgetGuard.release(lease)
-                errors += "${displayName(candidate)}: returned no usable answer"
+
+                circuit.recordFailure(System.currentTimeMillis(), quotaLike = false)
+                errors += displayName(candidate) + ": returned no usable answer"
+            } catch (timeout: TimeoutCancellationException) {
+                circuit.recordFailure(System.currentTimeMillis(), quotaLike = false)
+                errors += displayName(candidate) + ": request exceeded its provider deadline"
             } catch (cancelled: CancellationException) {
-                StudentBudgetGuard.release(lease)
+                circuit.abandonProbe()
                 throw cancelled
             } catch (error: Exception) {
-                StudentBudgetGuard.release(lease)
-                noteTransientFailure(candidate, error)
-                errors += "${displayName(candidate)}: " +
-                    (error.message ?: "request failed")
+                circuit.recordFailure(
+                    System.currentTimeMillis(),
+                    quotaLike = isQuotaFailure(error)
+                )
+                errors += displayName(candidate) + ": " + safeFailure(error)
             }
         }
 
@@ -86,6 +92,143 @@ class HybridAiProvider(
                 "The configured optional AI provider could not answer."
             }
         )
+    }
+
+    /**
+     * A streaming provider may fail after displaying partial text. Falling
+     * through to a second provider after that point would concatenate unrelated
+     * completions in the chat UI. Therefore fallback is permitted only before
+     * the current provider emits its first visible delta.
+     */
+    private suspend fun runStreamingProviders(
+        message: String,
+        context: ConversationContext,
+        onDelta: (String) -> Unit
+    ): String? {
+        val settings = context.settings
+        if (!settings.aiEnabled) return null
+        val candidates = providerOrder(settings).filter { configured(it, settings) }
+        if (candidates.isEmpty()) return null
+
+        val errors = mutableListOf<String>()
+        for (candidate in candidates) {
+            val circuit = circuitBreakers.getValue(candidate)
+            if (!circuit.tryAcquire()) {
+                errors += displayName(candidate) + ": temporarily unavailable; " +
+                    "retry window " + circuit.remainingSeconds() + "s"
+                continue
+            }
+
+            val provider = providerFor(candidate)
+            val attemptActive = AtomicBoolean(true)
+            val emittedVisibleText = AtomicBoolean(false)
+            val emittedCharacters = AtomicInteger(0)
+
+            try {
+                val result = withTimeout(timeoutFor(candidate)) {
+                    provider.answerStreaming(message, context) { delta ->
+                        if (attemptActive.get() && delta.isNotBlank()) {
+                            val total = emittedCharacters.addAndGet(delta.length)
+                            if (total > MAX_STREAM_CHARACTERS) {
+                                throw IOException(
+                                    "The AI provider stream exceeded AURA's output limit."
+                                )
+                            }
+                            emittedVisibleText.set(true)
+                            onDelta(delta)
+                        }
+                    }?.takeIf(String::isNotBlank)
+                }
+                attemptActive.set(false)
+
+                if (result != null) {
+                    circuit.recordSuccess()
+                    // Some providers use the default non-streaming interface.
+                    if (!emittedVisibleText.get()) onDelta(result)
+                    return result
+                }
+
+                circuit.recordFailure(System.currentTimeMillis(), quotaLike = false)
+                errors += displayName(candidate) + ": returned no usable answer"
+                if (emittedVisibleText.get()) {
+                    throw IOException(
+                        displayName(candidate) +
+                            " ended after partial output; fallback withheld to prevent mixed answers."
+                    )
+                }
+            } catch (timeout: TimeoutCancellationException) {
+                attemptActive.set(false)
+                circuit.recordFailure(System.currentTimeMillis(), quotaLike = false)
+                if (emittedVisibleText.get()) {
+                    throw IOException(
+                        displayName(candidate) +
+                            " timed out after partial output; retry the turn to avoid duplicated text.",
+                        timeout
+                    )
+                }
+                errors += displayName(candidate) + ": request exceeded its provider deadline"
+            } catch (cancelled: CancellationException) {
+                attemptActive.set(false)
+                circuit.abandonProbe()
+                throw cancelled
+            } catch (error: Exception) {
+                attemptActive.set(false)
+                circuit.recordFailure(
+                    System.currentTimeMillis(),
+                    quotaLike = isQuotaFailure(error)
+                )
+                if (emittedVisibleText.get()) {
+                    throw IOException(
+                        displayName(candidate) +
+                            " failed after partial output; fallback withheld to prevent mixed answers.",
+                        error
+                    )
+                }
+                errors += displayName(candidate) + ": " + safeFailure(error)
+            }
+        }
+
+        throw IOException(
+            errors.joinToString(" Then ").ifBlank {
+                "The configured optional AI provider could not answer."
+            }
+        )
+    }
+
+    private fun providerFor(name: String): AiProvider = when (name) {
+        PROVIDER_LOCAL -> local
+        PROVIDER_GEMINI -> gemini
+        PROVIDER_GROQ -> groq
+        else -> throw IllegalArgumentException("Unknown AI provider.")
+    }
+
+    private fun timeoutFor(provider: String): Long = when (provider) {
+        PROVIDER_LOCAL -> LOCAL_PROVIDER_TIMEOUT_MS
+        PROVIDER_GEMINI -> PUBLIC_PROVIDER_TIMEOUT_MS
+        PROVIDER_GROQ -> PUBLIC_PROVIDER_TIMEOUT_MS
+        else -> PUBLIC_PROVIDER_TIMEOUT_MS
+    }
+
+    private fun safeFailure(error: Exception): String {
+        val detail = error.message.orEmpty()
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .take(320)
+        return SecretRedactor.redact(
+            detail.ifBlank { error.javaClass.simpleName },
+            240
+        )
+    }
+
+    private fun isQuotaFailure(error: Exception): Boolean {
+        val detail = error.message.orEmpty().lowercase(Locale.ROOT)
+        return listOf(
+            "quota",
+            "rate limit",
+            "too many requests",
+            "429",
+            "resource_exhausted"
+        ).any(detail::contains)
     }
 
     internal fun providerOrder(settings: ButlerSettings): List<String> {
@@ -128,29 +271,6 @@ class HybridAiProvider(
             else -> false
         }
 
-    private fun isCoolingDown(provider: String): Boolean {
-        val now = System.currentTimeMillis()
-        return when (provider) {
-            PROVIDER_GEMINI -> now < geminiCooldownUntilMs
-            PROVIDER_GROQ -> now < groqCooldownUntilMs
-            else -> false
-        }
-    }
-
-    private fun noteTransientFailure(provider: String, error: Exception) {
-        val detail = error.message.orEmpty().lowercase(Locale.ROOT)
-        val quotaLike = listOf(
-            "quota", "rate limit", "too many requests", "temporarily unavailable"
-        ).any(detail::contains)
-        if (!quotaLike) return
-
-        val until = System.currentTimeMillis() + PROVIDER_COOLDOWN_MS
-        when (provider) {
-            PROVIDER_GEMINI -> geminiCooldownUntilMs = until
-            PROVIDER_GROQ -> groqCooldownUntilMs = until
-        }
-    }
-
     private fun displayName(provider: String): String = when (provider) {
         PROVIDER_LOCAL -> "Private Qwen"
         PROVIDER_GEMINI -> "Gemini"
@@ -158,25 +278,11 @@ class HybridAiProvider(
         else -> "AI"
     }
 
-    private fun meteredEndpoint(
-        provider: String,
-        settings: ButlerSettings
-    ): String = when (provider) {
-        PROVIDER_LOCAL -> settings.localAiEndpoint
-        PROVIDER_GEMINI -> "https://generativelanguage.googleapis.com"
-        PROVIDER_GROQ -> "https://api.groq.com"
-        else -> "https://external-ai.invalid"
-    }
-
     companion object {
         const val PROVIDER_AUTOMATIC = "automatic"
         const val PROVIDER_LOCAL = "local"
         const val PROVIDER_GEMINI = "gemini"
         const val PROVIDER_GROQ = "groq"
-
-        @Volatile private var geminiCooldownUntilMs: Long = 0L
-        @Volatile private var groqCooldownUntilMs: Long = 0L
-        private const val PROVIDER_COOLDOWN_MS = 10 * 60 * 1_000L
 
         fun normalizeProvider(value: String): String = when (
             value.trim().lowercase(Locale.ROOT)
@@ -187,14 +293,20 @@ class HybridAiProvider(
             else -> PROVIDER_AUTOMATIC
         }
 
+        /**
+         * Public-provider access is explicit: selecting that provider grants
+         * consent for it; automatic mode requires the separate fallback switch.
+         */
         fun publicProviderAllowed(
             settings: ButlerSettings,
             provider: String = PROVIDER_GEMINI
         ): Boolean {
             val selected = normalizeProvider(settings.aiProvider)
-            return when (provider) {
-                PROVIDER_GEMINI -> selected == PROVIDER_GEMINI || settings.allowPublicAiFallback
-                PROVIDER_GROQ -> selected == PROVIDER_GROQ || settings.allowPublicAiFallback
+            return when (normalizeProvider(provider)) {
+                PROVIDER_GEMINI ->
+                    selected == PROVIDER_GEMINI || settings.allowPublicAiFallback
+                PROVIDER_GROQ ->
+                    selected == PROVIDER_GROQ || settings.allowPublicAiFallback
                 else -> false
             }
         }
@@ -202,21 +314,19 @@ class HybridAiProvider(
         fun configuredProviderLabel(settings: ButlerSettings): String {
             if (!settings.aiEnabled) return "local-only"
             val configured = buildList {
-                if (settings.localAiEnabled && settings.localAiEndpoint.isNotBlank()) {
-                    add("private-qwen")
-                }
+                if (
+                    settings.localAiEnabled &&
+                    settings.localAiEndpoint.isNotBlank() &&
+                    settings.localAiModel.isNotBlank()
+                ) add("private-qwen")
                 if (
                     settings.geminiApiKey.isNotBlank() &&
                     publicProviderAllowed(settings, PROVIDER_GEMINI)
-                ) {
-                    add("gemini")
-                }
+                ) add("gemini")
                 if (
                     settings.groqApiKey.isNotBlank() &&
                     publicProviderAllowed(settings, PROVIDER_GROQ)
-                ) {
-                    add("groq")
-                }
+                ) add("groq")
             }
             return when (normalizeProvider(settings.aiProvider)) {
                 PROVIDER_LOCAL -> configured.firstOrNull { it == "private-qwen" }
@@ -225,5 +335,67 @@ class HybridAiProvider(
                 else -> configured.joinToString("→").takeIf(String::isNotBlank)
             } ?: "local-only"
         }
+
+        private const val LOCAL_PROVIDER_TIMEOUT_MS = 125_000L
+        private const val PUBLIC_PROVIDER_TIMEOUT_MS = 40_000L
+        private const val MAX_STREAM_CHARACTERS = 500_000
+    }
+}
+
+/**
+ * Per-router circuit breaker with one half-open recovery probe after cooldown.
+ * It deliberately keeps no response or credential data.
+ */
+private class ProviderCircuitBreaker {
+    private var consecutiveFailures = 0
+    private var openUntilMs = 0L
+    private var halfOpenProbeInFlight = false
+
+    @Synchronized
+    fun tryAcquire(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (openUntilMs == 0L) return true
+        if (nowMs < openUntilMs) return false
+        if (halfOpenProbeInFlight) return false
+        halfOpenProbeInFlight = true
+        return true
+    }
+
+    @Synchronized
+    fun recordSuccess() {
+        consecutiveFailures = 0
+        openUntilMs = 0L
+        halfOpenProbeInFlight = false
+    }
+
+    @Synchronized
+    fun recordFailure(nowMs: Long, quotaLike: Boolean) {
+        consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(8)
+        halfOpenProbeInFlight = false
+
+        val delayMs = if (quotaLike) {
+            QUOTA_COOLDOWN_MS
+        } else if (consecutiveFailures >= FAILURE_THRESHOLD) {
+            val exponent = (consecutiveFailures - FAILURE_THRESHOLD).coerceIn(0, 4)
+            (BASE_COOLDOWN_MS * (1L shl exponent)).coerceAtMost(MAX_COOLDOWN_MS)
+        } else {
+            0L
+        }
+        if (delayMs > 0L) openUntilMs = nowMs + delayMs
+    }
+
+    @Synchronized
+    fun abandonProbe() {
+        if (openUntilMs > 0L) halfOpenProbeInFlight = false
+    }
+
+    @Synchronized
+    fun remainingSeconds(nowMs: Long = System.currentTimeMillis()): Long =
+        ((openUntilMs - nowMs).coerceAtLeast(0L) + 999L) / 1_000L
+
+    private companion object {
+        const val FAILURE_THRESHOLD = 2
+        const val BASE_COOLDOWN_MS = 30_000L
+        const val MAX_COOLDOWN_MS = 10 * 60_000L
+        const val QUOTA_COOLDOWN_MS = 10 * 60_000L
     }
 }

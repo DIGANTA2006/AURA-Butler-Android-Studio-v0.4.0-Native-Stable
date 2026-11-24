@@ -10,6 +10,7 @@ import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.planning.PlanStore
 import `in`.diganta.aurabutler.planning.TaskPlanner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -135,6 +136,86 @@ class IntelligenceTestSuite {
         assertEquals(plan.id, retrieved?.id)
         assertEquals(plan.description, retrieved?.description)
         assertTrue(store.getHistory(plan.id).isNotEmpty())
+    }
+
+    @Test
+    fun taskPlannerPropagatesCancellationAndPersistsCancelledTaskState() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        val cancellingProvider = object : AiProvider {
+            override suspend fun answer(
+                message: String,
+                context: ConversationContext
+            ): String? {
+                throw CancellationException("caller cancelled")
+            }
+        }
+        val store = PlanStore()
+        val planner = TaskPlanner(
+            ReasoningEngine(cancellingProvider, registry),
+            registry,
+            store
+        )
+        val task = TaskPlanner.TaskNode(
+            title = "Analyze request",
+            description = "Run one analysis step",
+            type = TaskPlanner.TaskType.ANALYSIS,
+            maxRetries = 0
+        )
+        val plan = TaskPlanner.Plan(
+            title = "Cancellation test",
+            description = "Verify cancellation is never swallowed",
+            tasks = listOf(task)
+        )
+        store.save(plan)
+
+        var cancellationPropagated = false
+        try {
+            planner.executePlan(plan.id, context)
+        } catch (cancelled: CancellationException) {
+            cancellationPropagated = true
+            assertEquals("caller cancelled", cancelled.message)
+        }
+
+        assertTrue("The caller must receive cancellation.", cancellationPropagated)
+        val saved = store.get(plan.id)
+        assertEquals(TaskPlanner.PlanStatus.CANCELLED, saved?.status)
+        assertEquals(TaskPlanner.TaskStatus.CANCELLED, saved?.tasks?.single()?.status)
+    }
+
+    @Test
+    fun taskPlannerDoesNotMarkMissingAiAnalysisAsCompleted() = runBlocking {
+        val registry = ReasoningEngine.ToolRegistry()
+        val emptyProvider = object : AiProvider {
+            override suspend fun answer(
+                message: String,
+                context: ConversationContext
+            ): String? = null
+        }
+        val store = PlanStore()
+        val planner = TaskPlanner(
+            ReasoningEngine(emptyProvider, registry),
+            registry,
+            store
+        )
+        val task = TaskPlanner.TaskNode(
+            title = "Analyze request",
+            description = "Analyze a task without a provider response",
+            type = TaskPlanner.TaskType.ANALYSIS,
+            maxRetries = 0
+        )
+        val plan = TaskPlanner.Plan(
+            title = "No-provider test",
+            description = "A missing answer must not be reported as success",
+            tasks = listOf(task)
+        )
+        store.save(plan)
+
+        val result = planner.executePlan(plan.id, context)
+
+        assertFalse(result.success)
+        assertEquals(0, result.completedTasks)
+        assertEquals(TaskPlanner.PlanStatus.FAILED, store.get(plan.id)?.status)
+        assertEquals(TaskPlanner.TaskStatus.FAILED, store.get(plan.id)?.tasks?.single()?.status)
     }
 
     @Test

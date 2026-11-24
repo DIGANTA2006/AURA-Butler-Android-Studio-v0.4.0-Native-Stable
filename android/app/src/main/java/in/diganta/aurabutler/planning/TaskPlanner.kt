@@ -58,7 +58,8 @@ class TaskPlanner(
         COMPLETED,
         FAILED,
         SKIPPED,
-        BLOCKED
+        BLOCKED,
+        CANCELLED
     }
 
     data class Plan(
@@ -143,74 +144,121 @@ class TaskPlanner(
         options: PlanOptions = PlanOptions(),
         onProgress: (Plan, TaskNode, TaskStatus) -> Unit = { _, _, _ -> }
     ): ExecutionResult = withContext(Dispatchers.IO) {
-        val plan = planStore.get(planId) ?: throw IllegalArgumentException("Plan not found: $planId")
-        val mutablePlan = plan.copy(status = PlanStatus.ACTIVE, updatedAt = System.currentTimeMillis())
-        planStore.save(mutablePlan)
-
-        val startTime = System.currentTimeMillis()
+        val plan = planStore.get(planId)
+            ?: throw IllegalArgumentException("Plan not found: $planId")
+        val mutablePlan = plan.copy(
+            status = PlanStatus.ACTIVE,
+            updatedAt = System.currentTimeMillis()
+        )
+        val taskMap = mutablePlan.tasks.associateBy { it.id }.toMutableMap()
+        var currentTaskId: String? = null
         var completedCount = 0
         var failedCount = 0
-        var finalOutput: String? = null
         var errorSummary: String? = null
+        val startTime = System.currentTimeMillis()
+
+        // Persist the active transition before any task can run.
+        planStore.save(mutablePlan)
 
         try {
-            // Build dependency graph
-            val taskMap = mutablePlan.tasks.associateBy { it.id }.toMutableMap()
             val dependencyGraph = buildDependencyGraph(mutablePlan.tasks)
             val executionOrder = topologicalSort(dependencyGraph)
 
-            // Execute tasks in dependency order
             for (taskId in executionOrder) {
-                val task = taskMap[taskId]!!
-                
-                // Check if dependencies are satisfied
-                if (!dependenciesMet(task, taskMap)) {
-                    val blockedTask = task.copy(status = TaskStatus.BLOCKED)
-                    taskMap[taskId] = blockedTask
-                    onProgress(mutablePlan.copy(tasks = taskMap.values.toList()), blockedTask, TaskStatus.BLOCKED)
-                    continue
-                }
+                currentTaskId = taskId
+                val task = taskMap[taskId]
+                    ?: throw IllegalStateException("Plan task disappeared: $taskId")
 
-                // Execute task with retries
-                val result = executeTaskWithRetry(task, context, mutablePlan, onProgress)
-                taskMap[taskId] = result.updatedTask
-                
-                if (result.updatedTask.status == TaskStatus.COMPLETED) {
-                    completedCount++
-                    // Checkpoint if needed
-                    if (result.updatedTask.checkpoint) {
-                        val checkpointPlan = mutablePlan.copy(
+                if (!dependenciesMet(task, taskMap)) {
+                    val blockedTask = task.copy(
+                        status = TaskStatus.BLOCKED,
+                        error = "A dependency did not complete successfully."
+                    )
+                    taskMap[taskId] = blockedTask
+                    planStore.save(
+                        mutablePlan.copy(
                             tasks = taskMap.values.toList(),
                             updatedAt = System.currentTimeMillis()
                         )
-                        planStore.save(checkpointPlan)
-                    }
+                    )
+                    onProgress(
+                        mutablePlan.copy(tasks = taskMap.values.toList()),
+                        blockedTask,
+                        TaskStatus.BLOCKED
+                    )
+                    currentTaskId = null
+                    continue
+                }
+
+                // Record an in-flight state before entering a potentially long
+                // provider/action call. Cancellation will turn this into an
+                // explicit CANCELLED task, never a false success or auto-retry.
+                val runningTask = task.copy(
+                    status = TaskStatus.RUNNING,
+                    startedAt = task.startedAt ?: System.currentTimeMillis(),
+                    error = null
+                )
+                taskMap[taskId] = runningTask
+                planStore.save(
+                    mutablePlan.copy(
+                        tasks = taskMap.values.toList(),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+
+                val result = executeTaskWithRetry(
+                    runningTask,
+                    context,
+                    mutablePlan.copy(tasks = taskMap.values.toList()),
+                    onProgress
+                )
+                taskMap[taskId] = result.updatedTask
+
+                if (result.updatedTask.status == TaskStatus.COMPLETED) {
+                    completedCount++
                 } else if (result.updatedTask.status == TaskStatus.FAILED) {
                     failedCount++
                     errorSummary = result.updatedTask.error
-                    
                     if (!options.continueOnFailure) {
+                        planStore.save(
+                            mutablePlan.copy(
+                                tasks = taskMap.values.toList(),
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                        currentTaskId = null
                         break
                     }
                 }
 
-                onProgress(mutablePlan.copy(tasks = taskMap.values.toList()), result.updatedTask, result.updatedTask.status)
+                // Persist every terminal task transition, not just optional
+                // checkpoints. The current PlanStore remains process-local, but
+                // the latest in-process state is consistent for UI/recovery.
+                planStore.save(
+                    mutablePlan.copy(
+                        tasks = taskMap.values.toList(),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                onProgress(
+                    mutablePlan.copy(tasks = taskMap.values.toList()),
+                    result.updatedTask,
+                    result.updatedTask.status
+                )
+                currentTaskId = null
             }
 
-            // Determine final status
-            val allTasks = taskMap.values
+            val allTasks = taskMap.values.toList()
             val finalStatus = when {
-                failedCount > 0 && completedCount == 0 -> PlanStatus.FAILED
-                failedCount > 0 -> PlanStatus.FAILED  // Partial failure
-                completedCount == allTasks.size -> PlanStatus.COMPLETED
+                failedCount > 0 -> PlanStatus.FAILED
+                allTasks.isNotEmpty() && allTasks.all { it.status == TaskStatus.COMPLETED } ->
+                    PlanStatus.COMPLETED
                 else -> PlanStatus.FAILED
             }
-
-            finalOutput = synthesizePlanOutput(allTasks, mutablePlan.description)
-            
+            val finalOutput = synthesizePlanOutput(allTasks, mutablePlan.description)
             val finalPlan = mutablePlan.copy(
                 status = finalStatus,
-                tasks = allTasks.toList(),
+                tasks = allTasks,
                 completedAt = System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis()
             )
@@ -225,22 +273,55 @@ class TaskPlanner(
                 finalOutput = finalOutput,
                 errorSummary = errorSummary
             )
-
-        } catch (e: Exception) {
-            val failedPlan = mutablePlan.copy(
-                status = PlanStatus.FAILED,
-                updatedAt = System.currentTimeMillis()
+        } catch (cancelled: CancellationException) {
+            currentTaskId?.let { taskId ->
+                val task = taskMap[taskId]
+                if (task?.status == TaskStatus.RUNNING) {
+                    taskMap[taskId] = task.copy(
+                        status = TaskStatus.CANCELLED,
+                        error = "Execution was cancelled before a terminal result was recorded.",
+                        completedAt = System.currentTimeMillis()
+                    )
+                }
+            }
+            planStore.save(
+                mutablePlan.copy(
+                    status = PlanStatus.CANCELLED,
+                    tasks = taskMap.values.toList(),
+                    completedAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis()
+                )
             )
-            planStore.save(failedPlan)
-            
+            throw cancelled
+        } catch (error: Exception) {
+            currentTaskId?.let { taskId ->
+                val task = taskMap[taskId]
+                if (task?.status == TaskStatus.RUNNING) {
+                    taskMap[taskId] = task.copy(
+                        status = TaskStatus.FAILED,
+                        error = error.message ?: error.javaClass.simpleName,
+                        completedAt = System.currentTimeMillis()
+                    )
+                    failedCount++
+                }
+            }
+            errorSummary = error.message ?: error.javaClass.simpleName
+            planStore.save(
+                mutablePlan.copy(
+                    status = PlanStatus.FAILED,
+                    tasks = taskMap.values.toList(),
+                    completedAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
             ExecutionResult(
                 planId = planId,
                 success = false,
                 completedTasks = completedCount,
-                failedTasks = failedCount + 1,
+                failedTasks = maxOf(1, failedCount),
                 totalDurationMs = System.currentTimeMillis() - startTime,
                 finalOutput = null,
-                errorSummary = e.message
+                errorSummary = errorSummary
             )
         }
     }
@@ -332,7 +413,19 @@ class TaskPlanner(
             options = ReasoningEngine.ReasoningOptions(enableToolUse = false)
         )
         
-        return SingleTaskResult(true, reasoningResult.finalAnswer, null)
+        val answer = reasoningResult.finalAnswer.trim()
+        val credible = answer.isNotBlank() &&
+            reasoningResult.confidence >= MIN_ANALYSIS_CONFIDENCE &&
+            !answer.startsWith("The configured AI provider did not return an answer.")
+        return if (credible) {
+            SingleTaskResult(true, answer, null)
+        } else {
+            SingleTaskResult(
+                success = false,
+                output = null,
+                error = "Analysis was not completed: no sufficiently reliable provider answer was available."
+            )
+        }
     }
 
     private fun executeAction(task: TaskNode, context: ConversationContext): SingleTaskResult {
@@ -541,6 +634,10 @@ class TaskPlanner(
         val checkpointInterval: Int = 3
     )
 
+    private companion object {
+        const val MIN_ANALYSIS_CONFIDENCE = 0.55
+    }
+
     private data class TaskExecutionResult(
         val updatedTask: TaskNode,
         val success: Boolean
@@ -560,30 +657,48 @@ class TaskPlanner(
 class PlanStore {
     private val plans = ConcurrentHashMap<String, TaskPlanner.Plan>()
     private val versions = ConcurrentHashMap<String, MutableList<TaskPlanner.Plan>>()
-    
+
+    /**
+     * Serializes compound map/history mutations. ConcurrentHashMap protects
+     * individual entries, not the mutable version list stored inside an entry.
+     */
+    @Synchronized
     fun save(plan: TaskPlanner.Plan) {
         val updated = plan.copy(updatedAt = System.currentTimeMillis())
         plans[plan.id] = updated
-        
-        // Version history
-        versions.computeIfAbsent(plan.id) { mutableListOf() }.add(updated)
-        // Keep last 10 versions
-        val history = versions[plan.id]!!
-        if (history.size > 10) history.removeAt(0)
+
+        val history = versions.getOrPut(plan.id) { mutableListOf() }
+        history += updated
+        while (history.size > MAX_HISTORY_PER_PLAN) {
+            history.removeAt(0)
+        }
     }
-    
+
+    @Synchronized
     fun get(id: String): TaskPlanner.Plan? = plans[id]
-    
+
+    @Synchronized
     fun getAll(): List<TaskPlanner.Plan> = plans.values.toList()
-    
-    fun getHistory(id: String): List<TaskPlanner.Plan> = versions[id]?.toList() ?: emptyList()
-    
+
+    @Synchronized
+    fun getHistory(id: String): List<TaskPlanner.Plan> =
+        versions[id]?.toList() ?: emptyList()
+
+    @Synchronized
     fun delete(id: String) {
         plans.remove(id)
         versions.remove(id)
     }
-    
+
+    @Synchronized
     fun getActivePlans(): List<TaskPlanner.Plan> = plans.values
-        .filter { it.status == TaskPlanner.PlanStatus.ACTIVE || it.status == TaskPlanner.PlanStatus.PAUSED }
+        .filter {
+            it.status == TaskPlanner.PlanStatus.ACTIVE ||
+                it.status == TaskPlanner.PlanStatus.PAUSED
+        }
         .toList()
+
+    private companion object {
+        const val MAX_HISTORY_PER_PLAN = 10
+    }
 }
