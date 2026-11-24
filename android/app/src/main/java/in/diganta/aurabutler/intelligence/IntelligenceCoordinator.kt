@@ -2,7 +2,6 @@ package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
 import `in`.diganta.aurabutler.data.HybridAiProvider
-import `in`.diganta.aurabutler.data.KeylessLiveInfoProvider
 import `in`.diganta.aurabutler.memory.EncryptedSemanticMemoryPersistence
 import `in`.diganta.aurabutler.memory.EmbeddingProvider
 import `in`.diganta.aurabutler.memory.LazyOnnxSentenceEmbeddingProvider
@@ -57,8 +56,7 @@ class IntelligenceCoordinator(
         toolRegistry = toolRegistry,
         planStore = planStore,
         executor = ProductionTaskExecutor(
-            reasoningEngine = reasoningEngine,
-            liveInfo = KeylessLiveInfoProvider(appContext)
+            reasoningEngine = reasoningEngine
         )
     )
     private val proactiveEngine = ProactiveEngine(aiProvider, semanticMemory, settings, contextProvider)
