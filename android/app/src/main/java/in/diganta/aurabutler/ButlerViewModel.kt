@@ -1047,6 +1047,11 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         }
+        if (normalized.proactiveSuggestionsEnabled) {
+            AndroidProactiveScheduler.ensureScheduled(getApplication())
+        } else {
+            AndroidProactiveScheduler.cancel(getApplication())
+        }
         refreshProactiveSuggestions()
     }
 
@@ -1136,7 +1141,6 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update { it.copy(proactiveSuggestions = emptyList()) }
             return
         }
-        AndroidProactiveScheduler.ensureScheduled(getApplication())
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val engine = proactiveEngine()
