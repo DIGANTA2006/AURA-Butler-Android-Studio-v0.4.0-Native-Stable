@@ -28,6 +28,10 @@ class TaskPlanner(
         ProductionTaskExecutor(reasoningEngine)
 ) {
 
+    fun close() {
+        planStore.close()
+    }
+
     data class TaskNode(
         val id: String = UUID.randomUUID().toString(),
         val title: String,
