@@ -33,7 +33,7 @@ class ProactiveEngineLifecycleTest {
         val engine = engine(context)
 
         try {
-            engine.refreshNow(force = true)
+            engine.runDueAgentsNow()
             val suggestion = engine.getSuggestions(context, limit = 20)
                 .firstOrNull { it.title == "Recurring topic: software development" }
 
@@ -60,7 +60,7 @@ class ProactiveEngineLifecycleTest {
         val engine = engine(context)
 
         try {
-            engine.refreshNow(force = true)
+            engine.runDueAgentsNow()
             val habitSuggestions = engine.getSuggestions(context, limit = 20)
                 .filter { it.context.trigger == ProactiveEngine.Trigger.USER_HABIT }
 
@@ -104,12 +104,15 @@ class ProactiveEngineLifecycleTest {
         try {
             val completed = engine.runDueAgentsNow()
             val persisted = persistence.agentStates.values
+            val enabled = persisted.filter { it.enabled }
 
-            assertEquals(5, completed)
-            assertTrue(persisted.isNotEmpty())
-            assertTrue(persisted.all { it.lastRun != null })
-            assertTrue(persisted.all { it.runCount == 1 })
-            assertTrue(persisted.all { it.nextRun != null })
+            assertEquals(engine.getAgentStatus().count { it.enabled }, completed)
+            assertEquals(completed, enabled.size)
+            assertTrue(enabled.isNotEmpty())
+            assertTrue(enabled.all { it.lastRun != null })
+            assertTrue(enabled.all { it.runCount == 1 })
+            assertTrue(enabled.all { it.nextRun != null })
+            assertTrue(persisted.filterNot { it.enabled }.all { it.lastRun == null && it.runCount == 0 })
         } finally {
             engine.stop()
         }
