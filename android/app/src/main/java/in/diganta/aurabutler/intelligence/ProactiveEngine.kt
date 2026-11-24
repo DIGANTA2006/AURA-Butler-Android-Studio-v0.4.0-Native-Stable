@@ -425,17 +425,21 @@ class ProactiveEngine(
             description = "Consolidates memories, extracts patterns, applies forgetting curve",
             schedule = AgentSchedule.DAILY,
             task = { _ ->
-                val memoryEngine = semanticMemory ?: return@AgentTask AgentResult(
-                    success = false,
-                    output = "Memory consolidation is waiting for the verified ONNX embedding model.",
-                    error = "The on-device semantic model is not installed."
-                )
-                val result = memoryEngine.consolidate()
-                AgentResult(
-                    success = result.errors.isEmpty(),
-                    output = "Memory consolidation: merged ${result.mergedCount}, patterns ${result.patternsFound}, concepts ${result.conceptsCreated}, decayed ${result.decayedCount}.",
-                    error = result.errors.takeIf { it.isNotEmpty() }?.joinToString("; ")
-                )
+                val memoryEngine = semanticMemory
+                if (memoryEngine == null) {
+                    AgentResult(
+                        success = false,
+                        output = "Memory consolidation is waiting for the verified ONNX embedding model.",
+                        error = "The on-device semantic model is not installed."
+                    )
+                } else {
+                    val result = memoryEngine.consolidate()
+                    AgentResult(
+                        success = result.errors.isEmpty(),
+                        output = "Memory consolidation: merged ${result.mergedCount}, patterns ${result.patternsFound}, concepts ${result.conceptsCreated}, decayed ${result.decayedCount}.",
+                        error = result.errors.takeIf { it.isNotEmpty() }?.joinToString("; ")
+                    )
+                }
             }
         ))
 
