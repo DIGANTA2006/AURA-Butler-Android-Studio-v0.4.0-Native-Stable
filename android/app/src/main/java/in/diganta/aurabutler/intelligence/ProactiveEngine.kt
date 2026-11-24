@@ -216,7 +216,15 @@ class ProactiveEngine(
     }
 
     fun updateSemanticMemory(memory: SemanticMemory?) {
-        if (memory != null) semanticMemory = memory
+        semanticMemory = memory
+        val consolidation = agents.values.firstOrNull {
+            it.id == "aura-agent-memory-consolidation-v1"
+        } ?: return
+        val enabled = memory != null && settings.proactiveSuggestionsEnabled
+        val updated = consolidation.copy(enabled = enabled)
+        agents[updated.id] = updated
+        persistAgent(updated)
+        if (running && enabled) scheduleAgent(updated)
     }
 
     fun updateSettings(updated: ButlerSettings) {
@@ -256,9 +264,7 @@ class ProactiveEngine(
     fun stop() {
         running = false
         scheduler.shutdownNow()
-        // Keep the IO scope reusable so a settings change can restart the scheduler.
-        // Scheduled futures are cancelled by scheduler.shutdownNow(); no background
-        // coroutine is left scheduled after the executor has been stopped.
+        scope.cancel()
     }
 
     @Volatile
