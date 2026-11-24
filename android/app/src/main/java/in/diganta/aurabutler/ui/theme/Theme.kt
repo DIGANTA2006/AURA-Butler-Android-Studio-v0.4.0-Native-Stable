@@ -13,6 +13,8 @@ val AuraGold = Color(0xFFD6B66A)
 val AuraCream = Color(0xFFF6F3EC)
 val AuraInk = Color(0xFF17201D)
 
+// Screen background is slightly translucent so the animated AuraGlassBackdrop
+// shows through. Cards and dialogs use the opaque surface colours below.
 private val LightColors = lightColorScheme(
     primary = AuraGreen,
     onPrimary = Color.White,
@@ -22,7 +24,7 @@ private val LightColors = lightColorScheme(
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFFFE8A9),
     onSecondaryContainer = Color(0xFF251A00),
-    background = AuraCream,
+    background = Color(0xE0F6F3EC),
     onBackground = AuraInk,
     surface = Color(0xFFFFFBF5),
     onSurface = AuraInk,
@@ -40,7 +42,7 @@ private val DarkColors = darkColorScheme(
     onSecondary = Color(0xFF3D2F00),
     secondaryContainer = Color(0xFF574500),
     onSecondaryContainer = Color(0xFFFFE08A),
-    background = Color(0xFF111410),
+    background = Color(0xD0111410),
     onBackground = Color(0xFFE2E4DE),
     surface = Color(0xFF171B17),
     onSurface = Color(0xFFE2E4DE),
@@ -56,4 +58,3 @@ fun AuraTheme(content: @Composable () -> Unit) {
         content = content
     )
 }
-
