@@ -32,7 +32,17 @@ class AndroidPlanningRuntime(context: Context) {
         )
     )
 
-    fun getPlan(planId: String): TaskPlanner.Plan? = planStore.get(planId)
+    fun getPlan(planId: String): TaskPlanner.Plan? {
+        planStore.reload()
+        return planStore.get(planId)
+    }
 
-    fun getPlans(): List<TaskPlanner.Plan> = planStore.getAll()
+    fun getPlans(): List<TaskPlanner.Plan> {
+        planStore.reload()
+        return planStore.getAll()
+    }
+
+    fun close() {
+        planner.close()
+    }
 }
