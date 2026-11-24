@@ -30,7 +30,7 @@ class AndroidProactiveContextProvider(
         val percent = if (level >= 0 && scale > 0) {
             (level * 100f / scale).roundToInt().coerceIn(0, 100)
         } else {
-            100
+            -1
         }
         val status = battery?.getIntExtra(
             BatteryManager.EXTRA_STATUS,
