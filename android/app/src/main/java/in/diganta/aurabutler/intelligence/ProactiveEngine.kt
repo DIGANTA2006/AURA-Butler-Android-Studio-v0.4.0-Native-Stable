@@ -230,7 +230,9 @@ class ProactiveEngine(
         val consolidation = agents.values.firstOrNull {
             it.id == "aura-agent-memory-consolidation-v1"
         } ?: return
-        val enabled = memory != null && settings.proactiveSuggestionsEnabled
+        val enabled = memory != null &&
+            settings.proactiveSuggestionsEnabled &&
+            settings.memoryConsolidationEnabled
         val updated = consolidation.copy(enabled = enabled)
         agents[updated.id] = updated
         persistAgent(updated)
@@ -239,7 +241,11 @@ class ProactiveEngine(
 
     fun updateSettings(updated: ButlerSettings) {
         settings = updated
-        if (!updated.proactiveSuggestionsEnabled) stop()
+        if (!updated.proactiveSuggestionsEnabled) {
+            stop()
+        } else {
+            updateSemanticMemory(semanticMemory)
+        }
         // Production scheduling is owned by AndroidProactiveScheduler/WorkManager.
         // Call start() explicitly only for in-process consumers that opt into it.
     }
