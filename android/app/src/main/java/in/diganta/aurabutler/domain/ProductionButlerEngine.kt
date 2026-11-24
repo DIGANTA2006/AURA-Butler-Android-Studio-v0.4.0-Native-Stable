@@ -65,6 +65,13 @@ class ProductionButlerEngine(
 
     private val semanticMemoryLock = Any()
 
+    fun close() {
+        synchronized(semanticMemoryLock) {
+            semanticMemoryInstance?.close()
+            semanticMemoryInstance = null
+        }
+    }
+
     suspend fun semanticMemoryForProactive(): SemanticMemory? = semanticMemoryOrNull()
 
     private suspend fun semanticMemoryOrNull(): SemanticMemory? =
