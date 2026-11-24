@@ -1088,7 +1088,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun proactiveEngine(): ProactiveEngine = withContext(Dispatchers.IO) {
         val application = getApplication<Application>()
         val currentSettings = _uiState.value.settings
-        val semantic = butler.semanticMemoryForProactive()
+        val semantic = if (currentSettings.semanticMemoryEnabled) butler.semanticMemoryForProactive() else null
         val existing = proactiveEngineInstance
         if (existing != null) {
             existing.updateSettings(currentSettings)
@@ -1114,7 +1114,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     },
                     persistence = EncryptedProactivePersistence(application),
-                    actionHandler = AndroidProactiveActionHandler(application)
+                    actionHandler = AndroidProactiveActionHandler(application, planningRuntime)
                 ).also { engine ->
                     proactiveEngineInstance = engine
                     engine.start()
