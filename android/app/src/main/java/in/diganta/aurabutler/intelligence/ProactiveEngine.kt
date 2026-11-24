@@ -476,7 +476,7 @@ class ProactiveEngine(
     private fun registerDefaultAgents() {
         // Daily briefing agent
         registerAgent(BackgroundAgent(
-            id = "aura-agent-daily-briefing-v1",
+            id = "aura-agent-daily-briefing-v2",
             name = "Daily Briefing",
             description = "Generates a morning summary from local device state and AURA conversation context",
             schedule = AgentSchedule.CRON("0 7 * * *"), // 7 AM daily
@@ -574,7 +574,7 @@ class ProactiveEngine(
 
         // Habit learning agent
         registerAgent(BackgroundAgent(
-            id = "aura-agent-habit-learning-v1",
+            id = "aura-agent-habit-learning-v2",
             name = "Habit Learning",
             description = "Detects recurring topics and time patterns in AURA's own chat history only",
             schedule = AgentSchedule.WEEKLY,
@@ -595,7 +595,7 @@ class ProactiveEngine(
 
         // Research follow-up agent
         registerAgent(BackgroundAgent(
-            id = "aura-agent-research-follow-up-v1",
+            id = "aura-agent-research-follow-up-v2",
             name = "Research Follow-up",
             description = "Offers a user-approved refresh of explicitly tagged saved research notes",
             schedule = AgentSchedule.DAILY,
