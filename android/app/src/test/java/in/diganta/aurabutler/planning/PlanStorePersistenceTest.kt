@@ -47,6 +47,39 @@ class PlanStorePersistenceTest {
     }
 
     @Test
+    fun reloadObservesPlansCommittedByAnotherRuntime() {
+        val persistence = FakePlanPersistence()
+        val foreground = PlanStore(persistence)
+        val background = PlanStore(persistence)
+        val plan = TaskPlanner.Plan(
+            id = "created-in-background",
+            title = "Background plan",
+            description = "A WorkManager worker created this plan."
+        )
+        background.save(plan.copy(status = TaskPlanner.PlanStatus.PAUSED))
+
+        assertNull(foreground.get(plan.id))
+        foreground.reload()
+
+        assertEquals(TaskPlanner.PlanStatus.PAUSED, foreground.get(plan.id)?.status)
+    }
+
+    @Test
+    fun reloadKeepsPlansWhenNoPersistenceAdapterIsConfigured() {
+        val store = PlanStore()
+        val plan = TaskPlanner.Plan(
+            id = "memory-only",
+            title = "In-memory plan",
+            description = "No persistence adapter is configured."
+        )
+        store.save(plan)
+
+        store.reload()
+
+        assertEquals(plan.id, store.get(plan.id)?.id)
+    }
+
+    @Test
     fun deletionIsDurablyPropagated() {
         val persistence = FakePlanPersistence()
         val initial = PlanStore(persistence)
