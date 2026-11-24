@@ -127,6 +127,7 @@ import androidx.core.content.ContextCompat
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import `in`.diganta.aurabutler.screen.ScreenCaptureService
+import `in`.diganta.aurabutler.telephony.AuraPhoneActivity
 import `in`.diganta.aurabutler.ButlerViewModel
 import `in`.diganta.aurabutler.background.WakeWordService
 import `in`.diganta.aurabutler.domain.ActionSafetyPolicy
@@ -2370,6 +2371,27 @@ private fun SettingsScreen(
             )
         }
         item { SectionTitle("Behaviour", Icons.Rounded.Settings) }
+        item {
+            Card {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Native cellular phone", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Manage SIM calls through Android Telecom. AURA requires your explicit default-phone approval. Cellular call audio is not available to ordinary apps, so AI conversations and recording are not offered on SIM calls.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { context.startActivity(Intent(context, AuraPhoneActivity::class.java)) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Rounded.Call, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open AURA Native Phone")
+                    }
+                }
+            }
+        }
         item {
             SwitchRow(
                 title = "Background reminders",

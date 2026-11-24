@@ -89,6 +89,20 @@ structure, installs the model/tokens/eSpeak data, and optionally runs the tests
 and debug build. This is a one-time build-time download; the installed Android
 app then speaks offline and needs no voice API.
 
+## Zero-paid-cost telephone Butler (native SIM + self-hosted AURA AI VoIP)
+
+AURA's telephone architecture has a strict no-paid-third-party-telephony policy: no Twilio, Plivo, Vonage, Telnyx, Vapi, Retell, paid calling gateway, paid STT/TTS API or paid AI-calling subscription. Native SIM calls use the owner's existing carrier plan.
+
+The PR #3 working copy includes Android Telecom dialer-role handling, `InCallService`, owner-confirmed SIM dialing, manual answer/reject/end, capability-aware hold/resume and audio routing, incoming/ongoing notifications, and encrypted local call metadata history. The source is not yet Android-build- or Vivo-device-verified. Automatic answering remains disabled; spoken answer/reject voice commands are not yet connected. Emergency calls remain with Android's preloaded system dialer.
+
+The working copy also includes a separate app-to-owner-hosted-local-AI WebRTC caller. It uses authenticated WSS signalling, owner-operated coturn relay-only media, and locally provisioned faster-whisper, Ollama and Piper models. Transcript/summary retention is opt-in and fails closed when consent is unclear. A caller who declines can continue without transcript/summary retention. Android 13+ notification permission and microphone permission are requested before creating the foreground microphone service; communication audio-focus failure ends the session. This VoIP path is not a SIM audio bridge, PSTN gateway, or ordinary phone-number dialer; Docker, model and handset acceptance are still pending.
+
+**Cellular audio limitation:** an ordinary third-party app—even as default dialer—does not receive supported two-way SIM-call PCM or an API to inject AI speech into the carrier uplink. AURA does not record, secretly capture, transcribe or inject speech into SIM calls. Manual owner action controls native calls; no SIM call is represented as an AI conversation.
+
+A separate **Android AURA app → owner-hosted local AI endpoint** WebRTC path is now implemented in source: WSS device-token authentication, short-lived credentials for the owner's coturn relay, relay-only DTLS-SRTP audio, local faster-whisper ASR, local Ollama responses, local Piper English/Bengali/Hindi TTS, bounded in-memory conversation context, and encrypted on-device transcript/summary history. The endpoint is not a PSTN gateway or a general human-to-human AURA room. The Docker deployment and model weights must be provisioned by the owner; no models are automatically downloaded by the service. The local Python security/privacy/ASR-quality suite passes 20 tests and a separate Python CI job has been added to the working copy. That job has not run remotely because the changes have not been pushed. Android Gradle build, container build/runtime, actual model inference and physical-device media tests remain unverified.
+
+Calling ordinary mobile/landline numbers still requires a carrier-backed route and normal charges; no free PSTN bridge is claimed. See [the telephone architecture and verification gates](docs/AURA-ZERO-PAID-TELEPHONE-BUTLER.md).
+
 ## What AURA can do
 
 - Remember non-sensitive preferences and notes in encrypted local storage

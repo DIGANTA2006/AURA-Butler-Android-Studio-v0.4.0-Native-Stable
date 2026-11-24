@@ -1208,7 +1208,7 @@ class ProactiveEngine(
             val description = "Your recent AURA conversations returned to " + category +
                 " during the " + period + " on " + distinctDays +
                 " separate days in the last " + HABIT_LOOKBACK_DAYS +
-                " days. This reflects AURA chat history only, not activity in other apps. " +
+                " days. This insight uses only messages you shared with AURA. " +
                 "Would a flexible recurring task plan help?"
             results += ProactiveSuggestion(
                 type = SuggestionType.INSIGHT,

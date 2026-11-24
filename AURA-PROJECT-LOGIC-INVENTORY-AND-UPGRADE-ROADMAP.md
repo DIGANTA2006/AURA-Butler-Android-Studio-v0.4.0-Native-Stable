@@ -383,3 +383,40 @@ This section supersedes the Phase 2–5 implementation-gap bullets above where P
 ### Completion reporting
 
 Report these independently: implementation present on the PR branch; automated CI status for the exact latest commit; Android runtime/integration results; physical-device acceptance. Until each relevant item passes, the PR #3 upgrade must be described as implemented-in-progress, not fully production-complete.
+
+
+## 12. Zero-paid telephone Butler implementation and feasibility — 24 November 2026
+
+**Hard architecture decision:** the telephone feature must not introduce a paid third-party telephony, SIP/PSTN, AI-calling, ASR or TTS subscription. No Twilio, Plivo, Vonage, Telnyx, Vapi, Retell, paid gateway or paid voice API is permitted. The normal SIM path uses only the owner's existing SIM/carrier plan; the full conversational-AI path is a separate owner-controlled AURA-to-AURA VoIP service.
+
+### Native SIM call-management source added to the PR #3 working copy
+
+- Added `AuraPhoneActivity`, `AuraInCallService`, `AuraCallRegistry`, explicit call notifications/actions, call models and encrypted metadata-only call history.
+- Added `ROLE_DIALER` request flow, `ACTION_DIAL` intent handling, explicit user-initiated `TelecomManager.placeCall`, manual answer/reject/end, capability-aware hold/resume and audio-route controls.
+- Added history retention (30/90/180/365 days), bounded to 100 records, with deletion and clear-all controls. If Keystore-backed history cannot open, the UI reports that it is unavailable.
+- Added the phone entry point in Settings and a detailed architecture/acceptance document at `docs/AURA-ZERO-PAID-TELEPHONE-BUTLER.md`.
+- No cellular audio capture, audio injection, cellular recording, STT/TTS over SIM, covert recording, `CAPTURE_AUDIO_OUTPUT`, `READ_CALL_LOG`, root, hidden APIs or accessibility workaround is included.
+
+**Not yet wired or verified:** the existing voice command pipeline does not yet route spoken “answer/reject this call” commands into `AuraCallRegistry`; incoming approval is via the call UI or explicit notification action. There is no contact enrichment, screening/allowlist/automatic-answer policy, caller-purpose AI or post-call conversational report. Android CI and physical-device validation of these new files have not been run. Treat this as source implementation, not a release-ready dialer.
+
+### Independent AI VoIP path — implemented in source, validation pending
+
+The working copy now includes an Android AURA app-to-owner-hosted-local-AI WebRTC path: authenticated WSS signalling, short-lived owner coturn credentials, relay-only ICE, audio-only WebRTC/DTLS-SRTP, local VAD, faster-whisper ASR, Ollama local LLM and Piper local TTS. The service refuses startup when owner-provisioned local ASR/Piper models or credentials are missing; it does not download model weights or use external AI fallbacks. English, Bengali and Hindi voice paths are configured, but actual model quality and end-to-end audio acceptance remain unverified.
+
+Transcript/summary retention requires a clear caller yes in English, Bengali or Hindi. A clear no disables retention; two ambiguous answers also fail closed. No audio recording is written. Consent parsing and the two-step gate are deterministic and independently unit-tested. Transcript events are sent to Android only after consent, and the Android client stores them in encrypted local call history.
+
+The current endpoint supports only the Android AURA app calling the owner's local AI endpoint. It is not a general human-to-human AURA room relay, browser client, Android self-managed `PhoneAccount`/`ConnectionService`, PSTN bridge, or appointment-calling system. The source requires full Gradle, Docker, model, TURN/network and physical-device acceptance before it can be called working. Calling ordinary mobile/landline numbers through AI still requires carrier/PSTN interconnection and fees; this remains excluded.
+
+### Current PR #3 validation checkpoint
+
+The latest checked run `45319787869` compiled Kotlin and ran 182 tests: 181 passed and one failed in `ProactiveEngineLifecycleTest.detectsRecurringTopicsOnlyFromUserMessagesOnDistinctDays`; lint and debug assembly were skipped. Source inspection found that the suggestion text contained `other apps` while the test explicitly forbids that phrase, although it also requires the `AURA conversations` marker. The working-copy description now says `This insight uses only messages you shared with AURA.`; the test was not weakened. A focused harness produced the expected recurring-topic suggestion, but the full Gradle suite was not rerun. The exact failure assertion was not included in the fetched CI log, so only the deterministic source mismatch is confirmed, not a new passing CI result.
+
+### Next gates
+
+1. Run the failing test and complete unit/lint/debug tasks against the patched source on a machine with the pinned Gradle distribution and Android SDK 36; push only after local inspection.
+2. Obtain a fresh green Actions run on the feature branch. Keep PR #3 open/draft and do not merge until the full diff is reviewed and reconciled with `main`.
+3. Validate `ROLE_DIALER`, incoming/outgoing SIM calls, notification and lock-screen behaviour, hold/resume, audio routes, role revocation, process death and reboot on Vivo 1901/API30; repeat on a newer Android release.
+4. Validate encryption, key invalidation, corrupted history recovery, retention and deletion; verify that no SIM audio/transcript is captured.
+5. Add voice-command approval only through a trusted owner-authorization flow; keep manual UI approval as the default.
+6. Complete end-to-end validation of the implemented Android-app-to-local-AI WebRTC path: local model loading, WSS, coturn relay-only media, language acceptance, audio focus, lifecycle, latency/battery, and caller consent. Do not add PSTN bridging or paid vendors.
+7. If needed as a separate future scope, implement a general human-to-human AURA room relay and Android self-managed `ConnectionService`; neither is included in the current AI endpoint.

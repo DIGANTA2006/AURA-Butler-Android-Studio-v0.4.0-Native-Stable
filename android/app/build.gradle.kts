@@ -88,6 +88,10 @@ dependencies {
     // Keep aligned with the ONNX Runtime shared library bundled by sherpa-onnx v1.13.4.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // BSD-3-Clause, self-hosted WebRTC transport; no telephony or media cloud vendor.
+    implementation("io.github.webrtc-sdk:android:150.7871.08")
+    // Apache-2.0 WSS signaling transport.
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation(files("libs/sherpa-onnx-v1.13.4.aar"))
 
     implementation("androidx.compose.ui:ui")
