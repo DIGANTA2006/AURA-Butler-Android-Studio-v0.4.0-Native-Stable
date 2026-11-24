@@ -564,7 +564,7 @@ class ProactiveEngine(
             schedule = AgentSchedule.HOURLY,
             task = { ctx ->
                 val suggestions = mutableListOf<ProactiveSuggestion>()
-                if (ctx.deviceState.batteryLevel < 20 && !ctx.deviceState.isCharging) {
+                if (ctx.deviceState.batteryLevel in 0..19 && !ctx.deviceState.isCharging) {
                     suggestions += ProactiveSuggestion(
                         type = SuggestionType.MAINTENANCE,
                         title = "Low Battery",
@@ -1112,8 +1112,12 @@ class ProactiveEngine(
 
         val description = buildString {
             append("Your local AURA briefing: battery ")
-            append(device.batteryLevel).append("%")
-            append(if (device.isCharging) " and charging" else " and not charging")
+            if (device.batteryLevel in 0..100) {
+                append(device.batteryLevel).append("%")
+                append(if (device.isCharging) " and charging" else " and not charging")
+            } else {
+                append("level unavailable")
+            }
             append("; network ").append(device.networkType)
             append("; app-storage availability ")
             append(device.storageFreePercent.toInt()).append("%.")
