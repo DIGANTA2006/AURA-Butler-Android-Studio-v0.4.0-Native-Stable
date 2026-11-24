@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 class ProactiveEngine(
     private val aiProvider: AiProvider?,
-    private val semanticMemory: SemanticMemory?,
+    semanticMemory: SemanticMemory?,
     settings: ButlerSettings,
     private val contextProvider: ContextProvider,
     private val persistence: ProactiveSuggestionPersistence? = null,
@@ -32,6 +32,9 @@ class ProactiveEngine(
 ) {
     @Volatile
     private var settings: ButlerSettings = settings
+
+    @Volatile
+    private var semanticMemory: SemanticMemory? = semanticMemory
 
     data class ProactiveSuggestion(
         val id: String = UUID.randomUUID().toString(),
@@ -208,6 +211,10 @@ class ProactiveEngine(
                 )
             }
         }
+    }
+
+    fun updateSemanticMemory(memory: SemanticMemory?) {
+        if (memory != null) semanticMemory = memory
     }
 
     fun updateSettings(updated: ButlerSettings) {
