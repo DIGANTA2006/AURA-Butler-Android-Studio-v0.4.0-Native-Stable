@@ -15,8 +15,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.time.LocalDate
-import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 
 class ProactiveEngineLifecycleTest {
@@ -156,12 +154,7 @@ class ProactiveEngineLifecycleTest {
                     context: ConversationContext
                 ) = ProactiveEngine.ActionResult(
                     completed = false,
-                    pendingApproval = action
-                        .let { action.copy(payload = action.payload) }
-                        .let { action ->
-                            // The action gateway returns the canonical approval object.
-                            this@ProactiveEngineLifecycleTest.pendingAction
-                        }
+                    pendingApproval = this@ProactiveEngineLifecycleTest.pendingAction
                 )
             }
         )
