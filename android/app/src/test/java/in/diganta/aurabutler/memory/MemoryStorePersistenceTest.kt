@@ -1,6 +1,5 @@
 package `in`.diganta.aurabutler.memory
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -37,7 +36,7 @@ class MemoryStorePersistenceTest {
         assertEquals(entry.metadata, actual?.metadata)
         assertEquals(entry.tags, actual?.tags)
         assertEquals(entry.accessCount, actual?.accessCount)
-        assertArrayEquals(entry.embedding, actual?.embedding)
+        assertEquals(entry.embedding?.toList(), actual?.embedding?.toList())
     }
 
     @Test
