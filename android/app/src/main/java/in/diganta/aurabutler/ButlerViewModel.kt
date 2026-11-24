@@ -50,6 +50,8 @@ import `in`.diganta.aurabutler.runtime.CapabilityPolicy
 import `in`.diganta.aurabutler.runtime.PolicyDecision
 import `in`.diganta.aurabutler.runtime.SafeEndpointValidator
 import `in`.diganta.aurabutler.runtime.ResponseQualityGate
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
+import kotlinx.coroutines.CancellationException
 import `in`.diganta.aurabutler.data.ButlerSystemPrompt
 import `in`.diganta.aurabutler.data.DeepResearchProvider
 import kotlinx.coroutines.Dispatchers
@@ -306,6 +308,8 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 store.saveReminders(_uiState.value.reminders)
                 store.saveHistory(_uiState.value.actionHistory)
                 store.savePendingActions(_uiState.value.pendingActions)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 val assistant = ChatMessage(
                     sender = Sender.AURA,
@@ -542,6 +546,8 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 store.saveMessages(_uiState.value.messages)
                 store.saveMemories(_uiState.value.memories)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 val message = error.message ?: "AURA could not analyze that document."
                 _uiState.update { current ->
@@ -693,7 +699,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
-            val result = runCatching {
+            val result = runCatchingCancellable {
                 val prepared = load()
                 var privateError: Exception? = null
 
@@ -706,6 +712,8 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                             settings = settings
                         )
                         return@runCatching answer to "gemma-private-vision"
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
                     } catch (error: Exception) {
                         privateError = error
                     }
