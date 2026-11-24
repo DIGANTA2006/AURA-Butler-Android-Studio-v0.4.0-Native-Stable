@@ -563,6 +563,8 @@ class ProactiveEngine(
         val day = parseCronField(fields[2], 1, 31) ?: return null
         val month = parseCronField(fields[3], 1, 12) ?: return null
         val weekday = parseCronField(fields[4], 0, 7) ?: return null
+        val dayOfMonthWildcard = fields[2] == "*"
+        val weekdayWildcard = fields[4] == "*"
 
         var candidate = java.time.ZonedDateTime.now()
             .withSecond(0)
@@ -576,9 +578,14 @@ class ProactiveEngine(
             if (
                 candidate.minute in minute &&
                 candidate.hour in hour &&
-                cronDay in day &&
                 candidate.monthValue in month &&
-                (cronWeekday in weekday || (cronWeekday == 0 && 7 in weekday))
+                (
+                    (dayOfMonthWildcard && weekdayWildcard) ||
+                    (dayOfMonthWildcard && (cronWeekday in weekday || (cronWeekday == 0 && 7 in weekday))) ||
+                    (weekdayWildcard && cronDay in day) ||
+                    (!dayOfMonthWildcard && !weekdayWildcard &&
+                        (cronDay in day || cronWeekday in weekday || (cronWeekday == 0 && 7 in weekday)))
+                )
             ) {
                 return candidate.toInstant().toEpochMilli()
             }
@@ -826,11 +833,11 @@ class ProactiveEngine(
         if (recentUserText.isEmpty()) return emptyList()
 
         val reminders = recentUserText.filter { message ->
-            message.containsAny(
+            listOf(
                 "remind me", "don't forget", "need to finish",
                 "i should", "follow up", "deadline", "due tomorrow",
                 "tomorrow i will", "next week"
-            )
+            ).any { phrase -> message.contains(phrase, ignoreCase = true) }
         }
         val latest = reminders.lastOrNull() ?: return emptyList()
         val subject = latest.take(160).trim()
