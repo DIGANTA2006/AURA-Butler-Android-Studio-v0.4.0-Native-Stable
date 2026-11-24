@@ -65,6 +65,8 @@ class ProductionButlerEngine(
 
     private val semanticMemoryLock = Any()
 
+    suspend fun semanticMemoryForProactive(): SemanticMemory? = semanticMemoryOrNull()
+
     private suspend fun semanticMemoryOrNull(): SemanticMemory? =
         withContext(Dispatchers.IO) {
             semanticMemoryInstance?.let { return@withContext it }
