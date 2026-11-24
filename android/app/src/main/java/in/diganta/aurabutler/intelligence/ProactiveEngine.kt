@@ -257,6 +257,30 @@ class ProactiveEngine(
         scope.cancel()
     }
 
+    @Volatile
+    private var lastSuggestionRefreshAt: Long = 0L
+
+    private val suggestionRefreshLock = Any()
+
+    /**
+     * Re-evaluate local context on demand. Calls are throttled to prevent
+     * chat-message bursts from repeatedly running consolidation and pattern
+     * analysis. The scheduled agent executor remains independent.
+     */
+    suspend fun refreshNow(force: Boolean = false) {
+        if (!settings.proactiveSuggestionsEnabled) return
+        val now = System.currentTimeMillis()
+        val shouldRefresh = synchronized(suggestionRefreshLock) {
+            if (!force && now - lastSuggestionRefreshAt < MIN_REFRESH_INTERVAL_MS) {
+                false
+            } else {
+                lastSuggestionRefreshAt = now
+                true
+            }
+        }
+        if (shouldRefresh) generateProactiveSuggestions()
+    }
+
     /**
      * Get current proactive suggestions for the user.
      */
