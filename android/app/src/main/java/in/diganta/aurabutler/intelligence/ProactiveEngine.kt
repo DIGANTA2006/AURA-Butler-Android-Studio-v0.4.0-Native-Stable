@@ -809,11 +809,9 @@ class ProactiveEngine(
             )
         )
         val userMessages = conversationContext.recentMessages
-            .asSequence()
             .filter { it.sender == Sender.USER }
             .filter { !SecretRedactor.containsSensitive(it.text) }
             .takeLast(80)
-            .toList()
         val semanticEntries = memoryResult?.entries?.map { it.entry }.orEmpty()
         val privateEntries = conversationContext.memories.map { item ->
             SemanticMemory.MemoryEntry(
@@ -912,7 +910,7 @@ class ProactiveEngine(
                 suggestions += ProactiveSuggestion(
                     type = SuggestionType.PREPARATION,
                     title = "Good Morning",
-                    description = "Would you like your local AURA briefing with device status and saved-memory topics?"
+                    description = "Would you like your local AURA briefing with device status and saved-memory topics?",
                     action = ProactiveAction(
                         type = ProactiveEngine.ActionType.ASK_QUESTION,
                         payload = mapOf("question" to "Show your local AURA briefing?"),
