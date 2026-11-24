@@ -1152,6 +1152,14 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 engine.refreshNow()
                 val suggestions = engine.getSuggestions(context)
+                val expiredApprovals = engine.expirePendingApprovals()
+                expiredApprovals.forEach { action ->
+                    resumePlannerAfterApproval(
+                        action,
+                        approved = false,
+                        detail = "Approval expired while AURA was closed. The action was not executed."
+                    )
+                }
                 val recoveredApprovals = engine.getPendingApprovalActions()
                 _uiState.update { current ->
                     current.copy(
