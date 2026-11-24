@@ -51,6 +51,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // sherpa-onnx v1.13.4 is built against ONNX Runtime 1.27.0.
+            // Resolve the identical runtime shared object supplied by both AARs once.
+            pickFirsts += setOf("lib/arm64-v8a/libonnxruntime.so")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -82,6 +85,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
     implementation("androidx.work:work-runtime-ktx:2.10.5")
     implementation("androidx.security:security-crypto:1.1.0")
+    // Keep aligned with the ONNX Runtime shared library bundled by sherpa-onnx v1.13.4.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation(files("libs/sherpa-onnx-v1.13.4.aar"))
 

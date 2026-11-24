@@ -11,6 +11,8 @@ import `in`.diganta.aurabutler.runtime.AuraRuntimeStateMachine
 import `in`.diganta.aurabutler.runtime.LocalCrashJournal
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
 import `in`.diganta.aurabutler.voice.VoiceDiagnostics
+import `in`.diganta.aurabutler.memory.EmbeddingModelFiles
+import `in`.diganta.aurabutler.data.SecureStore
 
 class AuraApplication : Application() {
     override fun onCreate() {
@@ -26,5 +28,11 @@ class AuraApplication : Application() {
         AnalyzerDigestWorker.schedule(this)
         ProactiveAlertManager.createChannel(this)
         ScreenCaptureService.createChannel(this)
+
+        // The quantized MiniLM model is fetched only on unmetered Wi-Fi
+        // while battery is not low; no model bytes are bundled into the APK.
+        if (SecureStore(this).loadSettings().semanticMemoryEnabled) {
+            EmbeddingModelFiles.enqueueIfMissing(this)
+        }
     }
 }

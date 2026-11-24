@@ -427,7 +427,7 @@ class IntelligenceTestSuite {
         assertTrue(agents.any { it.name == "Storage Monitor" })
         assertTrue(agents.filter {
             it.name in setOf("Daily Briefing", "Habit Learning", "Research Follow-up")
-        }.all { !it.enabled })
+        }.all { it.enabled })
     }
 
     @Test

@@ -2,6 +2,7 @@ package `in`.diganta.aurabutler.model
 
 import org.json.JSONObject
 import java.util.UUID
+import `in`.diganta.aurabutler.intelligence.ProactiveEngine
 
 enum class Sender {
     USER,
@@ -231,6 +232,7 @@ data class AuraUiState(
         )
     ),
     val pendingActions: List<ButlerAction> = emptyList(),
+    val proactiveSuggestions: List<ProactiveEngine.ProactiveSuggestion> = emptyList(),
     val memories: List<MemoryItem> = emptyList(),
     val reminders: List<ReminderItem> = emptyList(),
     val actionHistory: List<ActionHistoryItem> = emptyList(),

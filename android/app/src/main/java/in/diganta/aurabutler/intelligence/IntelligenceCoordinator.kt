@@ -1,16 +1,25 @@
 package `in`.diganta.aurabutler.intelligence
 
 import `in`.diganta.aurabutler.data.AiProvider
-import `in`.diganta.aurabutler.data.HybridAiProvider
+import `in`.diganta.aurabutler.data.KeylessLiveInfoProvider
+import `in`.diganta.aurabutler.domain.LocalButlerEngine
+import `in`.diganta.aurabutler.memory.EncryptedSemanticMemoryPersistence
+import `in`.diganta.aurabutler.memory.EmbeddingProvider
+import `in`.diganta.aurabutler.memory.LazyOnnxSentenceEmbeddingProvider
 import `in`.diganta.aurabutler.memory.LocalEmbeddingProvider
 import `in`.diganta.aurabutler.memory.MemoryStore
 import `in`.diganta.aurabutler.memory.SemanticMemory
 import `in`.diganta.aurabutler.model.ChatMessage
+import `in`.diganta.aurabutler.model.ButlerAction
+import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.ButlerSettings
 import `in`.diganta.aurabutler.model.Sender
+import `in`.diganta.aurabutler.planning.EncryptedPlanStorePersistence
 import `in`.diganta.aurabutler.planning.PlanStore
+import `in`.diganta.aurabutler.planning.ProductionTaskExecutor
 import `in`.diganta.aurabutler.planning.TaskPlanner
+import android.content.Context
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,18 +37,44 @@ import kotlinx.coroutines.withContext
 class IntelligenceCoordinator(
     private val aiProvider: AiProvider,
     private val settings: ButlerSettings,
-    private val contextProvider: ContextProvider
+    private val contextProvider: ContextProvider,
+    private val appContext: Context? = null
 ) {
 
     // Core intelligence components
     private val toolRegistry = ReasoningEngine.ToolRegistry()
     private val reasoningEngine = ReasoningEngine(aiProvider, toolRegistry)
-    private val embeddingProvider = LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
-    private val memoryStore = MemoryStore()
+    private val embeddingProvider: EmbeddingProvider = appContext?.let {
+        LazyOnnxSentenceEmbeddingProvider(it)
+    } ?: LocalEmbeddingProvider("assets/embeddings/all-MiniLM-L6-v2.onnx")
+    private val semanticPersistence = appContext?.let(::EncryptedSemanticMemoryPersistence)
+    private val memoryStore = MemoryStore(
+        persistence = semanticPersistence
+    )
     private val semanticMemory = SemanticMemory(aiProvider, embeddingProvider, memoryStore)
-    private val planStore = PlanStore()
-    private val taskPlanner = TaskPlanner(reasoningEngine, toolRegistry, planStore)
-    private val proactiveEngine = ProactiveEngine(aiProvider, semanticMemory, settings, contextProvider)
+    private val planStore = PlanStore(
+        persistence = appContext?.let(::EncryptedPlanStorePersistence)
+    )
+    private val taskPlanner = TaskPlanner(
+        reasoningEngine = reasoningEngine,
+        toolRegistry = toolRegistry,
+        planStore = planStore,
+        executor = ProductionTaskExecutor(
+            reasoningEngine = reasoningEngine
+        )
+    )
+    private val proactivePersistence = appContext?.let(::EncryptedProactivePersistence)
+    private val proactiveEngine = ProactiveEngine(
+        aiProvider = aiProvider,
+        semanticMemory = semanticMemory,
+        settings = settings,
+        contextProvider = contextProvider,
+        persistence = proactivePersistence
+    )
+    private val localButler = LocalButlerEngine(
+        liveInfo = KeylessLiveInfoProvider(),
+        generalAi = aiProvider
+    )
 
     // State
     private var initialized = false
@@ -58,6 +93,8 @@ class IntelligenceCoordinator(
         val plan: TaskPlanner.Plan? = null,
         val memoriesUsed: List<SemanticMemory.MemoryEntry> = emptyList(),
         val suggestions: List<ProactiveEngine.ProactiveSuggestion> = emptyList(),
+        val pendingActions: List<ButlerAction> = emptyList(),
+        val memoryWrites: List<MemoryItem> = emptyList(),
         val confidence: Double = 1.0,
         val mode: IntelligenceMode = IntelligenceMode.BALANCED,
         val processingTimeMs: Long = 0
@@ -159,6 +196,14 @@ class IntelligenceCoordinator(
         }
     }
 
+    fun close() {
+        proactiveEngine.stop()
+        semanticMemory.close()
+        taskPlanner.close()
+        semanticPersistence?.close()
+        proactivePersistence?.close()
+    }
+
     /**
      * Get current intelligence status.
      */
@@ -218,11 +263,16 @@ class IntelligenceCoordinator(
         return localCommands.any { input.contains(it) }
     }
 
-    private fun processLocalCommand(input: String, context: ConversationContext, startTime: Long): IntelligenceResult {
-        // Delegate to existing LocalButlerEngine for local commands
-        // This maintains backward compatibility
+    private suspend fun processLocalCommand(
+        input: String,
+        context: ConversationContext,
+        startTime: Long
+    ): IntelligenceResult {
+        val reply = localButler.chat(input, context)
         return IntelligenceResult(
-            response = "[LOCAL_COMMAND] Would be handled by LocalButlerEngine: $input",
+            response = reply.assistantMessage,
+            pendingActions = reply.pendingActions,
+            memoryWrites = reply.memoryWrites,
             confidence = 0.95,
             mode = IntelligenceMode.MINIMAL,
             processingTimeMs = System.currentTimeMillis() - startTime

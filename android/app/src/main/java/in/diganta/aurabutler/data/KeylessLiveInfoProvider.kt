@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.StatFs
 import `in`.diganta.aurabutler.domain.LiveInfoProvider
 import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.runtime.runCatchingCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -198,10 +199,10 @@ class KeylessLiveInfoProvider(context: Context? = null) : LiveInfoProvider {
         val cleaned = query.trim().take(180)
         if (cleaned.isBlank()) return@withContext null
 
-        runCatching { wikipediaSummary(cleaned) }
+        runCatchingCancellable { wikipediaSummary(cleaned) }
             .getOrNull()
             ?.takeIf(String::isNotBlank)
-            ?: runCatching { duckDuckGoAnswer(cleaned) }
+            ?: runCatchingCancellable { duckDuckGoAnswer(cleaned) }
                 .getOrNull()
                 ?.takeIf(String::isNotBlank)
     }

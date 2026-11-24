@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.Closeable
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -23,7 +24,12 @@ class SemanticMemory(
     private val aiProvider: AiProvider?,
     private val embeddingProvider: EmbeddingProvider,
     private val memoryStore: MemoryStore
-) {
+) : Closeable {
+
+    override fun close() {
+        memoryStore.close()
+        (embeddingProvider as? Closeable)?.close()
+    }
 
     data class MemoryEntry(
         val id: String = UUID.randomUUID().toString(),
@@ -114,6 +120,77 @@ class SemanticMemory(
         maybeTriggerConsolidation()
         
         entry
+    }
+
+    /**
+     * Reconcile the encrypted application's private-memory records with the
+     * neural index. User-deleted items are removed from the semantic index;
+     * changed items are re-embedded locally. Only records already accepted by
+     * PrivateMemoryStore are indexed.
+     */
+    suspend fun reconcilePrivateMemories(
+        privateItems: List<MemoryItem>,
+        context: ConversationContext,
+        maxNewIndexes: Int = MAX_SYNC_PRIVATE_MEMORIES
+    ): Int = withContext(Dispatchers.IO) {
+        val currentIds = privateItems.mapTo(hashSetOf(), MemoryItem::id)
+        memoryStore.getAll()
+            .filter {
+                "secure-store-index" in it.tags && it.id !in currentIds
+            }
+            .forEach { memoryStore.delete(it.id) }
+
+        var indexed = 0
+        privateItems.takeLast(maxNewIndexes.coerceIn(1, MAX_SYNC_PRIVATE_MEMORIES)).forEach { item ->
+            val safeContent = SecretRedactor.redact(item.value, 2_000)
+            val safeLabel = SecretRedactor.redact(item.label, 120)
+            if (
+                safeContent.isBlank() ||
+                safeLabel.isBlank() ||
+                SecretRedactor.containsSensitive(safeContent + "\n" + safeLabel)
+            ) {
+                return@forEach
+            }
+
+            val existing = memoryStore.peek(item.id)
+            if (
+                existing != null &&
+                existing.content == safeContent &&
+                existing.label == safeLabel &&
+                existing.embedding?.size == embeddingProvider.dimension
+            ) {
+                return@forEach
+            }
+
+            val embedding = embeddingProvider.embed(safeContent)
+            require(embedding.size == embeddingProvider.dimension) {
+                "The semantic embedding provider returned an inconsistent vector size."
+            }
+            val metadata = extractMetadata(safeContent, context)
+            memoryStore.save(
+                MemoryEntry(
+                    id = item.id,
+                    content = safeContent,
+                    label = safeLabel,
+                    embedding = embedding,
+                    metadata = metadata,
+                    accessCount = existing?.accessCount ?: 0,
+                    lastAccessed = existing?.lastAccessed ?: item.createdAtEpochMs,
+                    createdAt = item.createdAtEpochMs,
+                    importance = 0.65,
+                    tags = buildSet {
+                        addAll(existing?.tags.orEmpty())
+                        add("secure-store-index")
+                        if (safeLabel.startsWith("[RESEARCH]", ignoreCase = true)) {
+                            add("research")
+                        }
+                    },
+                    source = MemorySource.USER_INPUT
+                )
+            )
+            indexed++
+        }
+        indexed
     }
 
     /**
@@ -766,6 +843,7 @@ class SemanticMemory(
         const val MAX_CONCEPT_DESCRIPTION_CHARS = 800
         const val CONCEPT_MEMORY_CONFIDENCE = 0.65
         const val CONCEPT_MEMORY_IMPORTANCE = 0.65
+        const val MAX_SYNC_PRIVATE_MEMORIES = 500
     }
 }
 
@@ -867,12 +945,20 @@ private object HashedTextVectorizer {
 }
 
 /**
- * In-memory semantic-memory index.
- * Entries are lost when the process exits; encrypted persistent integration
- * with PrivateMemoryStore remains a separate implementation task.
+ * Durable persistence boundary for the semantic index. Implementations must
+ * encrypt user content, metadata, and embedding vectors at rest.
  */
+interface SemanticMemoryPersistence {
+    fun loadAll(): List<SemanticMemory.MemoryEntry>
+    fun upsert(entry: SemanticMemory.MemoryEntry)
+    fun delete(id: String)
+    fun clear()
+}
+
+/** Bounded semantic index with an optional encrypted durable repository. */
 class MemoryStore(
-    private val maxEntries: Int = DEFAULT_MAX_ENTRIES
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+    private val persistence: SemanticMemoryPersistence? = null
 ) {
     private val memories = mutableMapOf<String, SemanticMemory.MemoryEntry>()
     private val accessOrder = mutableMapOf<String, Long>()
@@ -880,10 +966,20 @@ class MemoryStore(
 
     init {
         require(maxEntries > 0) { "MemoryStore capacity must be positive." }
+        persistence?.loadAll()
+            ?.sortedByDescending { it.lastAccessed }
+            ?.take(maxEntries)
+            ?.forEach { entry ->
+                memories[entry.id] = entry
+                touch(entry.id)
+            }
     }
 
     @Synchronized
     fun save(entry: SemanticMemory.MemoryEntry) {
+        // Persist first: a database failure must not make an in-memory write
+        // appear committed when the durable repository rejected it.
+        persistence?.upsert(entry)
         memories[entry.id] = entry
         touch(entry.id)
         evictLeastRecentlyUsed()
@@ -897,27 +993,34 @@ class MemoryStore(
     }
 
     @Synchronized
+    fun peek(id: String): SemanticMemory.MemoryEntry? = memories[id]
+
+    @Synchronized
     fun getAll(): List<SemanticMemory.MemoryEntry> = memories.values.toList()
 
     @Synchronized
     fun updateAccess(id: String) {
         memories[id]?.let { entry ->
-            memories[id] = entry.copy(
+            val updated = entry.copy(
                 accessCount = entry.accessCount + 1,
                 lastAccessed = System.currentTimeMillis()
             )
+            persistence?.upsert(updated)
+            memories[id] = updated
             touch(id)
         }
     }
 
     @Synchronized
     fun delete(id: String) {
+        persistence?.delete(id)
         memories.remove(id)
         accessOrder.remove(id)
     }
 
     @Synchronized
     fun clear() {
+        persistence?.clear()
         memories.clear()
         accessOrder.clear()
         accessSequence = 0L
@@ -926,8 +1029,11 @@ class MemoryStore(
     @Synchronized
     fun size(): Int = memories.size
 
+    fun close() {
+        (persistence as? Closeable)?.close()
+    }
+
     private fun touch(id: String) {
-        // Rebase before overflow while preserving access order.
         if (accessSequence == Long.MAX_VALUE) {
             val ordered = accessOrder.entries.sortedBy { it.value }
             accessOrder.clear()
@@ -945,6 +1051,7 @@ class MemoryStore(
             val oldestId = accessOrder.minByOrNull { it.value }?.key
                 ?: memories.keys.firstOrNull()
                 ?: return
+            persistence?.delete(oldestId)
             memories.remove(oldestId)
             accessOrder.remove(oldestId)
         }
