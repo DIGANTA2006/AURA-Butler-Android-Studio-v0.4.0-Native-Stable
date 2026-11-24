@@ -92,9 +92,10 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
     // Access this lazy property only inside Dispatchers.IO: its constructor
     // restores encrypted plan checkpoints from SQLite.
-    private val planningRuntime by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    private val planningRuntimeDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AndroidPlanningRuntime(getApplication())
     }
+    private val planningRuntime by planningRuntimeDelegate
 
     @Volatile
     private var proactiveEngineInstance: ProactiveEngine? = null
@@ -1463,6 +1464,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         proactiveEngineInstance?.stop()
         proactiveEngineInstance = null
+        if (planningRuntimeDelegate.isInitialized()) planningRuntime.close()
         super.onCleared()
     }
 
