@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -401,6 +403,28 @@ class ProactiveEngine(
             errorCount = agent.errorCount
         )
     }
+
+    /**
+     * Executes only agents whose persisted deadline is due. Used by WorkManager
+     * after process recreation; it does not start the in-process timer pool.
+     */
+    suspend fun runDueAgentsNow(): Int {
+        if (!settings.proactiveSuggestionsEnabled) return 0
+        val now = System.currentTimeMillis()
+        val due = agents.values
+            .filter { it.enabled && (it.nextRun == null || it.nextRun <= now) }
+            .sortedBy { it.nextRun ?: 0L }
+        due.forEach { agent ->
+            currentCoroutineContext().ensureActive()
+            runAgent(agent)
+        }
+        return due.size
+    }
+
+    fun nextAgentRunAt(): Long? = agents.values
+        .filter { it.enabled }
+        .mapNotNull { it.nextRun }
+        .minOrNull()
 
     /**
      * Register a custom background agent.
