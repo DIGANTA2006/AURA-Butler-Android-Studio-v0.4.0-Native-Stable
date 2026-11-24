@@ -1148,7 +1148,18 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 engine.refreshNow()
                 val suggestions = engine.getSuggestions(context)
-                _uiState.update { it.copy(proactiveSuggestions = suggestions) }
+                val recoveredApprovals = engine.getPendingApprovalActions()
+                _uiState.update { current ->
+                    current.copy(
+                        proactiveSuggestions = suggestions,
+                        pendingActions = (
+                            current.pendingActions.filterNot { pending ->
+                                recoveredApprovals.any { it.id == pending.id }
+                            } + recoveredApprovals
+                        ).takeLast(12)
+                    )
+                }
+                store.savePendingActions(_uiState.value.pendingActions)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
