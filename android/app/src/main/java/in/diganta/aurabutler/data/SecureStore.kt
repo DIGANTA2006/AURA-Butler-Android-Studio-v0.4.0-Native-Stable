@@ -38,11 +38,6 @@ class SecureStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
-    init {
-        migrateDualCloudDefaultsIfNeeded()
-        migrateProfessionalDefaultsIfNeeded()
-    }
-
     private val memoryStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         PrivateMemoryStore(appContext)
     }
@@ -57,6 +52,11 @@ class SecureStore(context: Context) {
      */
     private val remoteManifest by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         RemoteConfig.getCachedOrDefault(appContext)
+    }
+
+    init {
+        migrateDualCloudDefaultsIfNeeded()
+        migrateProfessionalDefaultsIfNeeded()
     }
 
     fun loadSettings(): ButlerSettings {
