@@ -183,10 +183,12 @@ class AuraPhoneActivity : ComponentActivity() {
             Toast.makeText(this, "Android Telecom is unavailable.", Toast.LENGTH_LONG).show()
             return
         }
-        runCatching {
+        try {
             telecomManager.placeCall(Uri.fromParts("tel", number, null), Bundle())
-        }.onFailure {
-            Toast.makeText(this, "Could not start the SIM call: ${it.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "Could not start the SIM call: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Could not start the SIM call: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
         }
     }
 

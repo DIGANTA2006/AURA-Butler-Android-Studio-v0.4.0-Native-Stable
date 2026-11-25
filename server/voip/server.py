@@ -686,8 +686,12 @@ async def signaling(websocket: WebSocket) -> None:
         if len(first) > MAX_SIGNAL_CHARS:
             await websocket.close(code=4400, reason="Message too large")
             return
-        join = json.loads(first)
-        if join.get("type") != "join" or join.get("client_id") != client_id:
+        try:
+            join = json.loads(first)
+        except json.JSONDecodeError:
+            await websocket.close(code=4400, reason="Invalid join message")
+            return
+        if not isinstance(join, dict) or join.get("type") != "join" or join.get("client_id") != client_id:
             await websocket.close(code=4400, reason="Invalid join message")
             return
         room_id = str(join.get("room", ""))
@@ -727,11 +731,17 @@ async def signaling(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 await session.send("error", {"message": "Malformed signaling message."})
                 continue
+            if not isinstance(message, dict):
+                await session.send("error", {"message": "Malformed signaling message."})
+                continue
             if message.get("room") != room_id:
                 await session.send("error", {"message": "Room mismatch."})
                 continue
             kind = message.get("type")
             payload = message.get("payload") or {}
+            if not isinstance(payload, dict):
+                await session.send("error", {"message": "Malformed signaling payload."})
+                continue
             if kind == "offer":
                 if session.peer is not None:
                     await session.send("error", {"message": "This session already has a WebRTC peer."})

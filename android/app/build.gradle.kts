@@ -53,7 +53,12 @@ android {
             useLegacyPackaging = true
             // sherpa-onnx v1.13.4 is built against ONNX Runtime 1.27.0.
             // Resolve the identical runtime shared object supplied by both AARs once.
-            pickFirsts += setOf("lib/arm64-v8a/libonnxruntime.so")
+            pickFirsts += setOf(
+                "lib/arm64-v8a/libonnxruntime.so",
+                "lib/armeabi-v7a/libonnxruntime.so",
+                "lib/x86/libonnxruntime.so",
+                "lib/x86_64/libonnxruntime.so"
+            )
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -91,7 +96,7 @@ dependencies {
     // BSD-3-Clause, self-hosted WebRTC transport; no telephony or media cloud vendor.
     implementation("io.github.webrtc-sdk:android:150.7871.08")
     // Apache-2.0 WSS signaling transport.
-    implementation("com.squareup.okhttp3:okhttp:5.5.1")
+    implementation("com.squareup.okhttp3:okhttp:5.4.0")
     implementation(files("libs/sherpa-onnx-v1.13.4.aar"))
 
     implementation("androidx.compose.ui:ui")
@@ -108,4 +113,13 @@ dependencies {
     androidTestImplementation("androidx.test:core:1.7.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+}
+
+// okhttp 5.5.x compiles against Android API 37, which AGP 8.13.2 does not support yet.
+// Keep every okhttp artifact, including the transitive okhttp-android, on 5.4.0.
+configurations.all {
+    resolutionStrategy {
+        force("com.squareup.okhttp3:okhttp:5.4.0")
+        force("com.squareup.okhttp3:okhttp-android:5.4.0")
+    }
 }

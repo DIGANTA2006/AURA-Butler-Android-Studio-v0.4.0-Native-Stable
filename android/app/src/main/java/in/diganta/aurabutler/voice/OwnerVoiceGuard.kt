@@ -375,9 +375,12 @@ object OwnerVoiceGuard {
 
     private fun playEnrollmentTone() {
         runCatching {
-            ToneGenerator(AudioManager.STREAM_MUSIC, 72).also { tone ->
+            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 72)
+            try {
                 tone.startTone(ToneGenerator.TONE_PROP_ACK, 100)
                 Thread.sleep(125L)
+            } finally {
+                // Release the native tone generator even if startTone() throws.
                 tone.release()
             }
         }

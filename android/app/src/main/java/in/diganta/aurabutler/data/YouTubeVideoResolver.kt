@@ -128,6 +128,8 @@ class YouTubeVideoResolver {
             candidates
                 .maxByOrNull { it.score }
                 ?.takeIf { it.score >= MIN_ACCEPTABLE_SCORE }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             Log.w(
                 TAG,

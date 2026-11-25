@@ -143,6 +143,9 @@ class GeminiCommandInterpreter {
                 mediaQuery = mediaQuery,
                 confidence = confidence
             )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            StudentBudgetGuard.release(budgetLease)
+            throw cancelled
         } catch (_: Exception) {
             StudentBudgetGuard.release(budgetLease)
             null

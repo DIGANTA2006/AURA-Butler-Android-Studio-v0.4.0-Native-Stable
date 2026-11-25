@@ -1,6 +1,7 @@
 package `in`.diganta.aurabutler.runtime
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -41,27 +42,39 @@ object RemoteConfig {
     private const val CACHE_KEY = "endpoint_manifest_cache"
     private const val CACHE_TS_KEY = "endpoint_manifest_cache_ts"
     private const val CACHE_TTL_MS = 24 * 60 * 60 * 1000L // 24 hours
+    private const val MANIFEST_RETRY_INTERVAL_MS = 30 * 60 * 1000L
+    private const val TRUSTED_ENDPOINT_PREFIX = "diganta2006--"
+    private const val TRUSTED_ENDPOINT_SUFFIX = ".modal.run"
 
     @Volatile private var cachedManifest: EndpointManifest? = null
+    @Volatile private var lastNetworkAttemptAt: Long = 0L
 
     /**
      * Fetches the manifest from network, falls back to cache, then to hardcoded defaults.
      * Thread-safe: runs on IO dispatcher, safe to call from main thread.
      */
     suspend fun fetchOrCached(context: Context): EndpointManifest = withContext(Dispatchers.IO) {
-        if (cachedManifest != null) return@withContext cachedManifest!!
+        val now = System.currentTimeMillis()
+        val inMemory = cachedManifest
+        if (inMemory != null && now - lastNetworkAttemptAt < MANIFEST_RETRY_INTERVAL_MS) {
+            return@withContext inMemory
+        }
 
-        // Try network first
+        // Try network first. Cancellation must reach the caller: it is never turned into a
+        // fallback manifest that is then cached for the rest of the process.
         val networkManifest = try {
             val url = URL(MANIFEST_URL)
             val connection = url.openConnection()
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
-            val json = connection.getInputStream().readBytes().decodeToString()
+            val json = connection.getInputStream().use { it.readBytes().decodeToString() }
             parseManifest(json).also { saveCache(context, json) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             null
         }
+        lastNetworkAttemptAt = now
 
         // Fallback to cache
         val cached = networkManifest ?: loadCache(context) ?: defaultManifest()
@@ -109,13 +122,31 @@ object RemoteConfig {
     /** Returns the cached manifest synchronously, or null if not loaded yet. */
     fun getCached(): EndpointManifest? = cachedManifest
 
+    /**
+     * The manifest decides where the owner's AURA token is sent, so an endpoint is accepted only
+     * over HTTPS on the owner's own Modal workspace (host = "<workspace>--...modal.run"). The
+     * *.modal.run domain is shared, so the workspace prefix is what actually restricts it.
+     * Anything else fails the whole manifest closed; the caller then uses the cache or defaults.
+     */
+    private fun trustedEndpoint(raw: String): String {
+        val trimmed = raw.trim()
+        val uri = java.net.URI(trimmed)
+        val host = uri.host.orEmpty().lowercase(java.util.Locale.ROOT)
+        val trusted = uri.scheme.equals("https", ignoreCase = true) &&
+            host.startsWith(TRUSTED_ENDPOINT_PREFIX) && host.endsWith(TRUSTED_ENDPOINT_SUFFIX)
+        require(trusted) {
+            "Remote manifest endpoint is not on the trusted AURA host."
+        }
+        return trimmed
+    }
+
     private fun parseManifest(json: String): EndpointManifest {
         val root = JSONObject(json)
         return EndpointManifest(
             version = root.getInt("version"),
-            textEndpoint = root.getString("textEndpoint"),
-            visionEndpoint = root.getString("visionEndpoint"),
-            researchEndpoint = root.getString("researchEndpoint"),
+            textEndpoint = trustedEndpoint(root.getString("textEndpoint")),
+            visionEndpoint = trustedEndpoint(root.getString("visionEndpoint")),
+            researchEndpoint = trustedEndpoint(root.getString("researchEndpoint")),
             models = EndpointManifest.Models(
                 text = root.getJSONObject("models").getString("text"),
                 vision = root.getJSONObject("models").getString("vision"),
