@@ -330,9 +330,7 @@ object AuraCallRegistry {
         )
     }
 
-    private companion object {
-        const val TAG = "AuraCallRegistry"
-        const val LEGACY_ROUTE_PREFIX = "legacy:"
-    }
+    private const val TAG = "AuraCallRegistry"
+    private const val LEGACY_ROUTE_PREFIX = "legacy:"
 
 }

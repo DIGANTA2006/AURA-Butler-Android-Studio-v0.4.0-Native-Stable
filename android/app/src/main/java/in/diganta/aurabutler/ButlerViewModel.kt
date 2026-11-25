@@ -365,6 +365,10 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun approveAction(action: ButlerAction) {
+        // Only an action that is still pending may run. A repeated tap or a stale permission
+        // callback finds the action already claimed and does nothing.
+        if (_uiState.value.pendingActions.none { it.id == action.id }) return
+
         if (action.isExpired()) {
             _uiState.update {
                 it.copy(
@@ -431,6 +435,14 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             }
             return
         }
+
+        // Claim the approval before any external side effect: the action leaves the pending list
+        // and that change is persisted first. A repeated callback or a process restart then cannot
+        // run the same approved action again (at-most-once execution).
+        _uiState.update { current ->
+            current.copy(pendingActions = current.pendingActions.filterNot { it.id == action.id })
+        }
+        store.savePendingActions(_uiState.value.pendingActions)
 
         when (val result = actionExecutor.execute(action)) {
             is ExecutionResult.Success -> {

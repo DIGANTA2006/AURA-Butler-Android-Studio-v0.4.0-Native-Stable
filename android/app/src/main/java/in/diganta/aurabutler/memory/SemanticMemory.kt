@@ -873,25 +873,6 @@ class LocalEmbeddingProvider(
     internal fun generatePseudoEmbedding(text: String): FloatArray = embed(text)
 }
 
-/**
- * Compatibility placeholder only. No request is sent to the configured endpoint.
- * Kept temporarily so old call sites cannot mistake remote inference for a feature.
- */
-@Deprecated(
-    message = "Remote embedding HTTP calls are not implemented; this is a local feature-hash fallback."
-)
-class RemoteEmbeddingProvider(
-    private val endpoint: String,
-    private val apiKey: String,
-    private val model: String = "text-embedding-3-small"
-) : EmbeddingProvider {
-    override val dimension: Int = 1536
-    val isRemote: Boolean = false
-
-    override fun embed(text: String): FloatArray =
-        HashedTextVectorizer.embed(text, dimension)
-}
-
 /** Signed feature hashing across bounded token, phrase and character features. */
 private object HashedTextVectorizer {
     private const val MAX_INPUT_CHARS = 6_000

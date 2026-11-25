@@ -4,11 +4,20 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
  * Small, encrypted metadata-only call history. It never stores call audio or transcripts.
  * The history is intentionally bounded and expires old entries on read/write.
+ *
+ * Failure policy: a read error is never reported as an empty history, and it never causes
+ * the stored data to be overwritten.
+ * - If the encrypted value cannot be decrypted, reads and writes throw
+ *   [HistoryUnavailableException] and the stored value is left untouched.
+ * - If the value decrypts but is not valid JSON, the raw value is copied to a quarantine key
+ *   (only when that key is still empty) before the history restarts, so it can be recovered.
+ * - Writes are committed synchronously and a failed commit is reported instead of ignored.
  */
 @Suppress("DEPRECATION")
 class EncryptedCallHistoryStore(context: Context) {
@@ -22,14 +31,19 @@ class EncryptedCallHistoryStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
+    /** Stored history exists but cannot be read or saved. Callers must report this, never show it as empty. */
+    class HistoryUnavailableException(message: String, cause: Throwable? = null) :
+        IllegalStateException(message, cause)
+
     @Synchronized
     fun append(record: AuraCallHistoryRecord) {
-        val records = readJson().apply {
-            put(record.toJson())
-        }
+        val records = readJson()
+        records.put(record.toJson())
         val bounded = JSONArray()
         val start = (records.length() - MAX_RECORDS).coerceAtLeast(0)
-        for (index in start until records.length()) bounded.put(records.getJSONObject(index))
+        for (index in start until records.length()) {
+            records.optJSONObject(index)?.let { bounded.put(it) }
+        }
         writeJson(removeExpired(bounded))
     }
 
@@ -53,6 +67,7 @@ class EncryptedCallHistoryStore(context: Context) {
         writeJson(remaining)
     }
 
+    /** Explicit user action: clears the stored history. */
     @Synchronized
     fun clear() {
         preferences.edit().remove(KEY_RECORDS).apply()
@@ -64,19 +79,45 @@ class EncryptedCallHistoryStore(context: Context) {
     @Synchronized
     fun setRetentionDays(days: Int) {
         require(days in SUPPORTED_RETENTION_DAYS) { "Unsupported call-history retention period." }
+        val current = readJson()
         preferences.edit().putInt(KEY_RETENTION_DAYS, days).apply()
-        writeJson(removeExpired(readJson()))
+        writeJson(removeExpired(current))
     }
 
-    private fun readJson(): JSONArray = runCatching {
-        JSONArray(preferences.getString(KEY_RECORDS, "[]") ?: "[]")
-    }.getOrElse {
-        // A malformed record must not crash call handling; callers can clear history to recover.
-        JSONArray()
+    /**
+     * Returns the stored history. An empty array means nothing is stored yet.
+     * Throws [HistoryUnavailableException] when stored data exists but cannot be decrypted.
+     */
+    private fun readJson(): JSONArray {
+        val raw = try {
+            preferences.getString(KEY_RECORDS, null)
+        } catch (error: Exception) {
+            throw HistoryUnavailableException(
+                "Encrypted call history could not be decrypted. The stored data was left untouched.",
+                error
+            )
+        }
+        if (raw.isNullOrEmpty()) return JSONArray()
+        return try {
+            JSONArray(raw)
+        } catch (error: JSONException) {
+            quarantine(raw)
+            JSONArray()
+        }
+    }
+
+    /** Keeps the first unreadable value so it can be recovered; an existing quarantine is never replaced. */
+    private fun quarantine(raw: String) {
+        if (!preferences.contains(KEY_QUARANTINE)) {
+            preferences.edit().putString(KEY_QUARANTINE, raw).apply()
+        }
     }
 
     private fun writeJson(value: JSONArray) {
-        preferences.edit().putString(KEY_RECORDS, value.toString()).apply()
+        val saved = preferences.edit().putString(KEY_RECORDS, value.toString()).commit()
+        if (!saved) {
+            throw HistoryUnavailableException("Encrypted call history could not be saved.")
+        }
     }
 
     private fun removeExpired(records: JSONArray): JSONArray {
@@ -124,6 +165,7 @@ class EncryptedCallHistoryStore(context: Context) {
     private companion object {
         const val PREFS_NAME = "aura_encrypted_call_history"
         const val KEY_RECORDS = "records_v1"
+        const val KEY_QUARANTINE = "records_unreadable_quarantine_v1"
         const val KEY_RETENTION_DAYS = "retention_days_v1"
         const val MAX_RECORDS = 100
         const val DEFAULT_RETENTION_DAYS = 90

@@ -196,6 +196,7 @@ class ProactiveEngine(
     }
 
     private val suggestions = ConcurrentHashMap<String, ProactiveSuggestion>()
+    private val inFlightSuggestionIds: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
     private val agents = ConcurrentHashMap<String, BackgroundAgent>()
     private val dueAgentMutex = Mutex()
     @Volatile
@@ -352,6 +353,9 @@ class ProactiveEngine(
             completed = false,
             error = "The proactive suggestion no longer exists."
         )
+        if (suggestion.accepted) {
+            return ActionResult(completed = false, error = "This suggestion has already been handled.")
+        }
         if (suggestion.expiresAt <= System.currentTimeMillis()) {
             dismissSuggestion(id)
             return ActionResult(completed = false, error = "This suggestion has expired.")
@@ -360,34 +364,57 @@ class ProactiveEngine(
             completed = false,
             error = "No production action handler is configured."
         )
-        val result = try {
-            handler.execute(suggestion.action, context)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            ActionResult(
+        // Claim the suggestion before its side effect. A tap or retry that arrives while the first
+        // call is running is rejected rather than executing the action a second time.
+        if (!inFlightSuggestionIds.add(id)) {
+            return ActionResult(completed = false, error = "This suggestion is already being handled.")
+        }
+        try {
+            // Re-read after claiming: an earlier call may have finished between the checks above.
+            val current = suggestions[id] ?: return ActionResult(
                 completed = false,
-                error = (error.message ?: error.javaClass.simpleName).take(500)
+                error = "The proactive suggestion no longer exists."
             )
-        }
+            if (current.accepted) {
+                return ActionResult(completed = false, error = "This suggestion has already been handled.")
+            }
+            if (current.pendingApprovalAction != null) {
+                return ActionResult(
+                    completed = false,
+                    error = "This suggestion is already waiting for your approval."
+                )
+            }
+            val result = try {
+                handler.execute(current.action, context)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                ActionResult(
+                    completed = false,
+                    error = (error.message ?: error.javaClass.simpleName).take(500)
+                )
+            }
 
-        val updated = when {
-            result.pendingApproval != null -> suggestion.copy(
-                pendingApprovalAction = result.pendingApproval,
-                lastActionError = null
-            )
-            result.completed -> suggestion.copy(
-                accepted = true,
-                pendingApprovalAction = null,
-                lastActionError = null
-            )
-            else -> suggestion.copy(
-                lastActionError = result.error ?: result.detail ?: "The suggested action did not complete."
-            )
+            val updated = when {
+                result.pendingApproval != null -> current.copy(
+                    pendingApprovalAction = result.pendingApproval,
+                    lastActionError = null
+                )
+                result.completed -> current.copy(
+                    accepted = true,
+                    pendingApprovalAction = null,
+                    lastActionError = null
+                )
+                else -> current.copy(
+                    lastActionError = result.error ?: result.detail ?: "The suggested action did not complete."
+                )
+            }
+            suggestions[id] = updated
+            persistence?.saveSuggestion(updated)
+            return result
+        } finally {
+            inFlightSuggestionIds.remove(id)
         }
-        suggestions[id] = updated
-        persistence?.saveSuggestion(updated)
-        return result
     }
 
     fun resolveActionApproval(
@@ -1289,15 +1316,6 @@ class ProactiveEngine(
         }
         
         return context.settings.proactiveSuggestionsEnabled
-    }
-
-    private suspend fun executeAction(
-        action: ProactiveAction,
-        context: ConversationContext
-    ): Boolean {
-        val handler = actionHandler ?: return false
-        val result = handler.execute(action, context)
-        return result.completed
     }
 
     interface ContextProvider {
