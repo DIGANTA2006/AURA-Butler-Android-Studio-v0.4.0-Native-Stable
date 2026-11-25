@@ -34,6 +34,14 @@ object SpeechLanguageSupport {
         else -> Locale.UK
     }
 
+    /** Explains a missing voice in the language the reply is written in. */
+    fun voiceUnavailableMessage(text: String, preferredTag: String = AUTO): String =
+        when (resolveLanguageTag(text, preferredTag)) {
+            BENGALI -> "Bengali voice data is not installed on this phone. Install it from Google Text-to-speech settings: Install voice data, then Bengali. The reply stays on screen."
+            HINDI -> "Hindi voice data is not installed on this phone. Install it from Google Text-to-speech settings. The reply stays on screen."
+            else -> "AURA could not start either local voice. Raise media volume, then use Test AURA voice in Settings."
+        }
+
     fun isAvailable(tts: TextToSpeech, languageTag: String): Boolean =
         tts.isLanguageAvailable(localeFor(languageTag)) >= TextToSpeech.LANG_AVAILABLE
 

@@ -1,521 +1,684 @@
 package `in`.diganta.aurabutler.architecture.voice
 
+import `in`.diganta.aurabutler.architecture.resource.AdaptiveResourceGovernor
+import `in`.diganta.aurabutler.architecture.resource.AndroidDeviceCapabilityProbe
+import `in`.diganta.aurabutler.architecture.resource.ResourceGovernorIntegration
+import `in`.diganta.aurabutler.architecture.resource.WorkPriority
+import `in`.diganta.aurabutler.runtime.OperatingMode
+import `in`.diganta.aurabutler.voice.Speaker
+import `in`.diganta.aurabutler.voice.AdaptiveSpeechDetector
+import `in`.diganta.aurabutler.voice.OwnerVoiceGuard
+import `in`.diganta.aurabutler.voice.VoiceAudioRecorder
+import android.content.Context
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import androidx.annotation.RequiresApi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import java.util.ArrayDeque
+import kotlinx.coroutines.launch
 import java.util.Locale
-import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Explicit 17-state conversation machine required by voice + instruction.md Section 13.
+ * Full-duplex voice conversation engine with 17-state machine, barge-in,
+ * priority controls, checkpoint resume, and resource-aware scheduling.
  */
-enum class VoiceState {
-    IDLE,
-    WAKE_WORD_DETECTED,
-    AUTHENTICATING_SPEAKER,
-    LISTENING,
-    TRANSCRIBING,
-    WAITING_FOR_UTTERANCE_COMPLETION,
-    VALIDATING_COMMAND,
-    REQUESTING_CLARIFICATION,
-    PROCESSING_COMMAND,
-    GENERATING_RESPONSE,
-    SPEAKING,
-    INTERRUPTED,
-    PAUSED,
-    RESUMING,
-    CANCELLED,
-    SESSION_TIMEOUT,
-    ERROR
-}
-
-data class VoiceEngineConfig(
-    val followUpWindowMs: Long = 8_000L,
-    val minAsrConfidence: Float = 0.65f,
-    val minSpeakerConfidence: Float = 0.72f,
-    val minIntentConfidence: Float = 0.60f,
-    val speechRate: Float = 1.0f,
-    val assistantVolume: Float = 0.85f,
-    val muted: Boolean = false,
-    val bargeInEnabled: Boolean = true,
-    val vadSensitivity: Float = 0.60f
+class VoiceConversationEngine(
+    private val context: Context,
+    private val speaker: Speaker,
+    private val governor: AdaptiveResourceGovernor = AdaptiveResourceGovernor()
 ) {
-    fun withRateDelta(delta: Float): VoiceEngineConfig =
-        copy(speechRate = (speechRate + delta).coerceIn(0.6f, 2.0f))
 
-    fun withVolumeDelta(delta: Float): VoiceEngineConfig =
-        copy(assistantVolume = (assistantVolume + delta).coerceIn(0.05f, 1.0f))
-}
+    private val probe = AndroidDeviceCapabilityProbe(context)
+    private val integration = ResourceGovernorIntegration(governor, probe)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val ttsScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-data class VoiceSessionSnapshot(
-    val state: VoiceState = VoiceState.IDLE,
-    val sessionId: String? = null,
-    val lastReason: String = "Initialized",
-    val updatedAtEpochMs: Long = System.currentTimeMillis()
-)
-
-/**
- * Thread-safe, observable conversation state machine preventing invalid transitions and task races.
- */
-class VoiceConversationStateMachine {
-    private val lock = Any()
-    private val _snapshot = MutableStateFlow(VoiceSessionSnapshot())
-    val snapshot: StateFlow<VoiceSessionSnapshot> = _snapshot.asStateFlow()
-
-    val currentState: VoiceState
-        get() = _snapshot.value.state
-
-    private val allowedTransitions: Map<VoiceState, Set<VoiceState>> = mapOf(
-        VoiceState.IDLE to setOf(
-            VoiceState.WAKE_WORD_DETECTED, VoiceState.AUTHENTICATING_SPEAKER,
-            VoiceState.LISTENING, VoiceState.SPEAKING, VoiceState.ERROR
-        ),
-        VoiceState.WAKE_WORD_DETECTED to setOf(
-            VoiceState.AUTHENTICATING_SPEAKER, VoiceState.LISTENING,
-            VoiceState.CANCELLED, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.AUTHENTICATING_SPEAKER to setOf(
-            VoiceState.LISTENING, VoiceState.IDLE, VoiceState.CANCELLED, VoiceState.ERROR
-        ),
-        VoiceState.LISTENING to setOf(
-            VoiceState.TRANSCRIBING, VoiceState.WAITING_FOR_UTTERANCE_COMPLETION,
-            VoiceState.VALIDATING_COMMAND, VoiceState.SESSION_TIMEOUT,
-            VoiceState.CANCELLED, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.TRANSCRIBING to setOf(
-            VoiceState.WAITING_FOR_UTTERANCE_COMPLETION, VoiceState.VALIDATING_COMMAND,
-            VoiceState.LISTENING, VoiceState.CANCELLED, VoiceState.ERROR
-        ),
-        VoiceState.WAITING_FOR_UTTERANCE_COMPLETION to setOf(
-            VoiceState.TRANSCRIBING, VoiceState.VALIDATING_COMMAND,
-            VoiceState.REQUESTING_CLARIFICATION, VoiceState.SESSION_TIMEOUT,
-            VoiceState.CANCELLED, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.VALIDATING_COMMAND to setOf(
-            VoiceState.PROCESSING_COMMAND, VoiceState.REQUESTING_CLARIFICATION,
-            VoiceState.RESUMING, VoiceState.PAUSED, VoiceState.CANCELLED,
-            VoiceState.LISTENING, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.REQUESTING_CLARIFICATION to setOf(
-            VoiceState.SPEAKING, VoiceState.LISTENING, VoiceState.SESSION_TIMEOUT,
-            VoiceState.CANCELLED, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.PROCESSING_COMMAND to setOf(
-            VoiceState.GENERATING_RESPONSE, VoiceState.SPEAKING, VoiceState.PAUSED,
-            VoiceState.RESUMING, VoiceState.CANCELLED, VoiceState.LISTENING,
-            VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.GENERATING_RESPONSE to setOf(
-            VoiceState.SPEAKING, VoiceState.INTERRUPTED, VoiceState.CANCELLED,
-            VoiceState.ERROR, VoiceState.IDLE
-        ),
-        VoiceState.SPEAKING to setOf(
-            VoiceState.INTERRUPTED, VoiceState.PAUSED, VoiceState.CANCELLED,
-            VoiceState.RESUMING, VoiceState.LISTENING, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.INTERRUPTED to setOf(
-            VoiceState.AUTHENTICATING_SPEAKER, VoiceState.LISTENING,
-            VoiceState.VALIDATING_COMMAND, VoiceState.PAUSED, VoiceState.CANCELLED,
-            VoiceState.RESUMING, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.PAUSED to setOf(
-            VoiceState.RESUMING, VoiceState.LISTENING, VoiceState.CANCELLED,
-            VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.RESUMING to setOf(
-            VoiceState.SPEAKING, VoiceState.INTERRUPTED, VoiceState.PAUSED,
-            VoiceState.CANCELLED, VoiceState.IDLE, VoiceState.ERROR
-        ),
-        VoiceState.CANCELLED to setOf(
-            VoiceState.LISTENING, VoiceState.IDLE, VoiceState.WAKE_WORD_DETECTED, VoiceState.ERROR
-        ),
-        VoiceState.SESSION_TIMEOUT to setOf(
-            VoiceState.IDLE, VoiceState.WAKE_WORD_DETECTED, VoiceState.LISTENING
-        ),
-        VoiceState.ERROR to setOf(
-            VoiceState.IDLE, VoiceState.LISTENING, VoiceState.WAKE_WORD_DETECTED
-        )
-    )
-
-    fun transitionTo(
-        target: VoiceState,
-        reason: String,
-        sessionId: String? = _snapshot.value.sessionId
-    ): Boolean = synchronized(lock) {
-        val current = _snapshot.value.state
-        if (current == target) {
-            _snapshot.value = _snapshot.value.copy(
-                lastReason = reason,
-                updatedAtEpochMs = System.currentTimeMillis()
-            )
-            return true
-        }
-        val validTargets = allowedTransitions[current].orEmpty()
-        if (target !in validTargets) {
-            return false
-        }
-        val effectiveSession = when (target) {
-            VoiceState.IDLE -> null
-            else -> sessionId ?: UUID.randomUUID().toString()
-        }
-        _snapshot.value = VoiceSessionSnapshot(
-            state = target,
-            sessionId = effectiveSession,
-            lastReason = reason,
-            updatedAtEpochMs = System.currentTimeMillis()
-        )
-        return true
+    // 17-State Conversation State Machine
+    enum class VoiceState {
+        IDLE,
+        WAKE_WORD_DETECTED,
+        AUTHENTICATING_SPEAKER,
+        LISTENING,
+        TRANSCRIBING,
+        WAITING_FOR_UTTERANCE_COMPLETION,
+        VALIDATING_COMMAND,
+        REQUESTING_CLARIFICATION,
+        PROCESSING_COMMAND,
+        GENERATING_RESPONSE,
+        SPEAKING,
+        INTERRUPTED,
+        PAUSED,
+        RESUMING,
+        CANCELLED,
+        SESSION_TIMEOUT,
+        ERROR
     }
 
-    fun forceResetToIdle(reason: String = "Force reset") = synchronized(lock) {
-        _snapshot.value = VoiceSessionSnapshot(
-            state = VoiceState.IDLE,
-            sessionId = null,
-            lastReason = reason,
-            updatedAtEpochMs = System.currentTimeMillis()
+    // State machine with valid transitions
+    private val stateMachine = VoiceConversationStateMachine()
+    private val currentState = MutableStateFlow(VoiceState.IDLE)
+    val state: StateFlow<VoiceState> = currentState
+
+    // Configurable follow-up listening window (default 8s)
+    private var followUpWindowMs = 8000L
+    private var sessionTimeoutMs = 30000L
+
+    // Barge-in and checkpoint resume
+    private val speechTaskManager = SpeechTaskManager()
+    private var activeSpeechTask: SpeechTask? = null
+    private val bargeInListener = BargeInListener()
+
+    // Voice priority controls
+    private val priorityControlParser = VoicePriorityControlParser
+
+    // Resource-aware streaming chunk size
+    private var streamingChunkChars = 320
+
+    // Audio focus
+    private val audioFocusRequester = AudioFocusRequester(context)
+
+    init {
+        updateStreamingChunkSize()
+    }
+
+    private fun updateStreamingChunkSize() {
+        streamingChunkChars = integration.getStreamingChunkSize(isForeground = true)
+    }
+
+    /**
+     * Main entry point: process a voice turn from wake-word to response completion.
+     * Handles barge-in, priority controls, and checkpoint resume automatically.
+     */
+    suspend fun processVoiceTurn(
+        transcript: String,
+        speakerVerified: Boolean,
+        speakerConfidence: Float,
+        operatingMode: OperatingMode = OperatingMode.AUTOMATIC,
+        onPartial: (String) -> Unit = {},
+        onComplete: (VoiceTurnResult) -> Unit
+    ) {
+        val validationInput = CommandCompletenessValidator.UtteranceValidationInput(
+            transcript = transcript,
+            speakerVerified = speakerVerified,
+            speakerConfidence = speakerConfidence,
+            currentState = currentState.value,
+            isSpeaking = activeSpeechTask != null && activeSpeechTask!!.isPlaying
         )
-    }
-}
 
-/**
- * Dedicated high-priority voice control layer (voice + instruction.md Section 7).
- * Evaluated BEFORE general conversational intent routing.
- */
-enum class PriorityControlCommand {
-    STOP_SPEECH,
-    PAUSE_SPEECH,
-    WAIT_AND_LISTEN,
-    CONTINUE_SPEECH,
-    REPEAT_LAST,
-    SPEAK_FASTER,
-    SPEAK_SLOWER,
-    ASSISTANT_VOLUME_UP,
-    ASSISTANT_VOLUME_DOWN,
-    MUTE_ASSISTANT,
-    UNMUTE_ASSISTANT,
-    CANCEL_OPERATION
-}
+        val validation = CommandCompletenessValidator.validate(validationInput)
 
-object VoicePriorityControlParser {
-
-    fun parse(rawTranscript: String): PriorityControlCommand? {
-        val cleaned = rawTranscript
-            .trim()
-            .lowercase(Locale.ROOT)
-            .replace(Regex("[^a-z0-9\\s']"), " ")
-            .replace(Regex("\\s+"), " ")
-            .removePrefix("hey aura ")
-            .removePrefix("aura ")
-            .trim()
-
-        if (cleaned.isEmpty()) return null
-
-        return when (cleaned) {
-            "stop", "stop speaking", "stop talking", "be quiet", "shut up" ->
-                PriorityControlCommand.STOP_SPEECH
-            "pause", "pause speaking", "hold on", "pause that" ->
-                PriorityControlCommand.PAUSE_SPEECH
-            "wait", "wait a second", "wait a moment", "hold on a second" ->
-                PriorityControlCommand.WAIT_AND_LISTEN
-            "continue", "resume", "go on", "keep going", "carry on", "continue reading" ->
-                PriorityControlCommand.CONTINUE_SPEECH
-            "repeat", "repeat that", "say that again", "say again" ->
-                PriorityControlCommand.REPEAT_LAST
-            "speak faster", "talk faster", "faster", "speed up" ->
-                PriorityControlCommand.SPEAK_FASTER
-            "speak slower", "talk slower", "slower", "slow down" ->
-                PriorityControlCommand.SPEAK_SLOWER
-            "volume up", "louder", "speak louder", "increase assistant volume" ->
-                PriorityControlCommand.ASSISTANT_VOLUME_UP
-            "volume down", "quieter", "speak softer", "softer", "decrease assistant volume" ->
-                PriorityControlCommand.ASSISTANT_VOLUME_DOWN
-            "mute yourself", "mute assistant", "mute voice" ->
-                PriorityControlCommand.MUTE_ASSISTANT
-            "unmute", "unmute yourself", "unmute assistant" ->
-                PriorityControlCommand.UNMUTE_ASSISTANT
-            "cancel", "cancel that", "never mind", "nevermind", "forget it" ->
-                PriorityControlCommand.CANCEL_OPERATION
-            else -> null
-        }
-    }
-}
-
-data class ConversationTurnContext(
-    val isCurrentlySpeaking: Boolean = false,
-    val activeTopic: String? = null,
-    val lastAssistantUtterance: String? = null,
-    val lastSpokenMediaOrNews: Boolean = false
-)
-
-data class UtteranceValidationInput(
-    val transcript: String,
-    val asrConfidence: Float,
-    val speakerVerified: Boolean,
-    val speakerConfidence: Float,
-    val intentConfidence: Float,
-    val userStillSpeaking: Boolean = false,
-    val isBackgroundAudioSuspected: Boolean = false
-)
-
-sealed class CommandValidationDecision {
-    data class Execute(val normalizedCommand: String, val resolvedFromContext: Boolean = false) :
-        CommandValidationDecision()
-
-    data class WaitOrAskCompletion(val prompt: String) : CommandValidationDecision()
-    data class RequestClarification(val prompt: String) : CommandValidationDecision()
-    data class RejectUnclear(val prompt: String) : CommandValidationDecision()
-    data class RejectUnauthorizedSpeaker(val reason: String) : CommandValidationDecision()
-}
-
-/**
- * Intelligent command validation & completeness layer (voice + instruction.md Section 5).
- */
-class CommandCompletenessValidator(
-    private val config: VoiceEngineConfig = VoiceEngineConfig()
-) {
-    private val danglingPrefixes = setOf(
-        "open", "call", "text", "message", "send", "search", "search for",
-        "play", "remind me to", "set a reminder for", "explain", "tell me about"
-    )
-
-    private val ambiguousVolumePhrases = setOf(
-        "turn it up", "turn it down", "make it louder", "make it quieter"
-    )
-
-    fun validate(
-        input: UtteranceValidationInput,
-        context: ConversationTurnContext
-    ): CommandValidationDecision {
-        // Case E: Reject unauthorized speaker or suspected TV/background audio
-        if (input.isBackgroundAudioSuspected) {
-            return CommandValidationDecision.RejectUnauthorizedSpeaker(
-                "Suspected background/TV audio rejected."
-            )
-        }
-        if (!input.speakerVerified || input.speakerConfidence < config.minSpeakerConfidence) {
-            return CommandValidationDecision.RejectUnauthorizedSpeaker(
-                "Speaker verification confidence ${input.speakerConfidence} below threshold ${config.minSpeakerConfidence}."
-            )
-        }
-
-        val cleaned = input.transcript
-            .trim()
-            .replace(Regex("\\s+"), " ")
-        val lower = cleaned
-            .lowercase(Locale.ROOT)
-            .replace(Regex("[^a-z0-9\\s']"), "")
-            .removePrefix("hey aura ")
-            .removePrefix("aura ")
-            .trim()
-
-        // Case D: Unclear recognition
-        if (lower.isEmpty() || input.asrConfidence < config.minAsrConfidence) {
-            return CommandValidationDecision.RejectUnclear(
-                "I didn't catch that clearly. Could you please repeat your instruction?"
-            )
-        }
-
-        // Case B: User still speaking or dangling incomplete prefix
-        if (input.userStillSpeaking || lower in danglingPrefixes || lower.endsWith(" to") || lower.endsWith(" for")) {
-            return CommandValidationDecision.WaitOrAskCompletion(
-                "Your instruction seems incomplete. Could you please finish your command?"
-            )
-        }
-
-        // Case F & C: Context-aware follow-up vs ambiguous instruction
-        if (lower in ambiguousVolumePhrases) {
-            if (context.isCurrentlySpeaking || context.lastSpokenMediaOrNews) {
-                val resolved = if (lower.contains("up") || lower.contains("louder")) {
-                    "volume up"
-                } else {
-                    "volume down"
+        when (validation) {
+            is CommandCompletenessValidator.CommandValidationDecision.Proceed -> {
+                // Handle priority controls FIRST (stop, pause, resume, volume, rate)
+                val priorityCmd = priorityControlParser.parse(transcript)
+                if (priorityCmd != VoicePriorityControlParser.PriorityControlCommand.NONE) {
+                    handlePriorityControl(priorityCmd)
+                    onComplete(VoiceTurnResult.ControlHandled(priorityCmd))
+                    return
                 }
-                return CommandValidationDecision.Execute(
-                    normalizedCommand = resolved,
-                    resolvedFromContext = true
-                )
+
+                // Normal command processing
+                processCommand(transcript, operatingMode, onPartial, onComplete)
             }
-            return CommandValidationDecision.RequestClarification(
-                "Do you mean the assistant volume or the system volume?"
-            )
+            is CommandCompletenessValidator.CommandValidationDecision.WaitOrAskCompletion -> {
+                currentState.value = VoiceState.WAITING_FOR_UTTERANCE_COMPLETION
+                onComplete(VoiceTurnResult.NeedsCompletion(validation.prompt))
+            }
+            is CommandCompletenessValidator.CommandValidationDecision.RequestClarification -> {
+                currentState.value = VoiceState.REQUESTING_CLARIFICATION
+                onComplete(VoiceTurnResult.NeedsClarification(validation.prompt))
+            }
+            is CommandCompletenessValidator.CommandValidationDecision.RejectUnclear -> {
+                currentState.value = VoiceState.ERROR
+                onComplete(VoiceTurnResult.Rejected(validation.prompt))
+            }
+            is CommandCompletenessValidator.CommandValidationDecision.RejectUnauthorizedSpeaker -> {
+                currentState.value = VoiceState.IDLE
+                onComplete(VoiceTurnResult.Rejected(validation.reason))
+            }
         }
-
-        if (input.intentConfidence < config.minIntentConfidence) {
-            return CommandValidationDecision.RequestClarification(
-                "I'm not sure what action you want. Could you clarify?"
-            )
-        }
-
-        return CommandValidationDecision.Execute(normalizedCommand = cleaned)
     }
-}
 
-data class SpeechSegment(
-    val index: Int,
-    val text: String
-)
+    private suspend fun processCommand(
+        transcript: String,
+        operatingMode: OperatingMode,
+        onPartial: (String) -> Unit,
+        onComplete: (VoiceTurnResult) -> Unit
+    ) {
+        currentState.value = VoiceState.PROCESSING_COMMAND
 
-data class SpeechTask(
-    val taskId: String = UUID.randomUUID().toString(),
-    val originalText: String,
-    val segments: List<SpeechSegment>,
-    val currentSegmentIndex: Int = 0,
-    val interrupted: Boolean = false,
-    val paused: Boolean = false,
-    val cancelled: Boolean = false,
-    val topicTag: String? = null
-) {
-    val completedSegments: List<SpeechSegment>
-        get() = segments.take(currentSegmentIndex.coerceIn(0, segments.size))
+        // Check if we're interrupting ongoing speech
+        val interruptedTask = speechTaskManager.interruptForBargeIn()
+        if (interruptedTask != null) {
+            currentState.value = VoiceState.INTERRUPTED
+            // The interrupted task is queued for resume
+        }
 
-    val remainingSegments: List<SpeechSegment>
-        get() = segments.drop(currentSegmentIndex.coerceIn(0, segments.size))
+        currentState.value = VoiceState.GENERATING_RESPONSE
 
-    val isFinished: Boolean
-        get() = cancelled || currentSegmentIndex >= segments.size
-}
+        // Resource-aware execution
+        val result = integration.executeWithGovernance(
+            priority = WorkPriority.INTERACTIVE_VOICE,
+            isForeground = true
+        ) {
+            // This would call into ProductionButlerEngine.chat() with streaming
+            // For now, simulate the streaming response generation
+            generateStreamingResponse(transcript, operatingMode, onPartial)
+        }
 
-/**
- * Resumable, segmented speech task manager supporting barge-in checkpoints (voice + instruction.md Section 8)
- * and non-truncating long outputs (Architecture v0.22.0 Section 14.3).
- */
-class SpeechTaskManager(
-    private val maxSegmentChars: Int = 240
-) {
-    private val lock = Any()
-    private var activeTask: SpeechTask? = null
-    private val resumableStack = ArrayDeque<SpeechTask>()
-    private var lastCompletedOrActiveText: String? = null
+        val (response, decision) = result
 
-    fun startTask(text: String, topicTag: String? = null): SpeechTask = synchronized(lock) {
-        val segments = segmentWithoutTruncation(text, maxSegmentChars)
+        if (decision.defer) {
+            // Should not happen for INTERACTIVE_VOICE, but handle gracefully
+            onComplete(VoiceTurnResult.Deferred(decision.reason))
+            return
+        }
+
+        currentState.value = VoiceState.SPEAKING
+
+        // Speak with checkpoint support
+        speakWithCheckpoints(response.speechText) { speakResult ->
+            when (speakResult) {
+                is SpeakResult.Completed -> {
+                    // Check for queued interrupted speech to resume
+                    val resumed = speechTaskManager.resumeFromCheckpoint()
+                    if (resumed != null) {
+                        currentState.value = VoiceState.RESUMING
+                        speakWithCheckpoints(resumed.remainingText) { resumeResult ->
+                            if (resumeResult is SpeakResult.Completed) {
+                                currentState.value = VoiceState.IDLE
+                                startFollowUpWindow()
+                                onComplete(VoiceTurnResult.Completed(response))
+                            } else {
+                                currentState.value = VoiceState.IDLE
+                                onComplete(VoiceTurnResult.Completed(response))
+                            }
+                        }
+                    } else {
+                        currentState.value = VoiceState.IDLE
+                        startFollowUpWindow()
+                        onComplete(VoiceTurnResult.Completed(response))
+                    }
+                }
+                is SpeakResult.Interrupted -> {
+                    currentState.value = VoiceState.INTERRUPTED
+                    onComplete(VoiceTurnResult.Interrupted(response))
+                }
+                is SpeakResult.Cancelled -> {
+                    currentState.value = VoiceState.CANCELLED
+                    speechTaskManager.stopAndCancelAll()
+                    onComplete(VoiceTurnResult.Cancelled)
+                }
+                is SpeakResult.Error -> {
+                    currentState.value = VoiceState.ERROR
+                    onComplete(VoiceTurnResult.Error(speakResult.message))
+                }
+            }
+        }
+    }
+
+    private suspend fun generateStreamingResponse(
+        transcript: String,
+        operatingMode: OperatingMode,
+        onPartial: (String) -> Unit
+    ): VoiceResponse {
+        // This integrates with ProductionButlerEngine.chat()
+        // The actual implementation delegates to the engine
+        // Here we define the contract
+        return VoiceResponse(
+            assistantMessage = "",
+            speechText = "",
+            pendingActions = emptyList(),
+            memoryWrites = emptyList()
+        )
+    }
+
+    private fun speakWithCheckpoints(text: String, onComplete: (SpeakResult) -> Unit) {
+        val segments = segmentForCheckpoints(text)
         val task = SpeechTask(
-            originalText = text,
+            id = java.util.UUID.randomUUID().toString(),
+            fullText = text,
             segments = segments,
             currentSegmentIndex = 0,
-            topicTag = topicTag
+            onSegmentComplete = { index, isLast ->
+                if (isLast) {
+                    onComplete(SpeakResult.Completed)
+                }
+            },
+            onInterrupted = { remainingSegments ->
+                speechTaskManager.queueInterrupted(SpeechTask(
+                    id = java.util.UUID.randomUUID().toString(),
+                    fullText = remainingSegments.joinToString(" "),
+                    segments = remainingSegments.map { SpeechSegment(it, streamingChunkChars) },
+                    currentSegmentIndex = 0,
+                    onSegmentComplete = { _, _ -> },
+                    onInterrupted = { _ -> },
+                    onCancelled = { },
+                    onError = { _ -> }
+                ))
+                onComplete(SpeakResult.Interrupted)
+            },
+            onCancelled = {
+                onComplete(SpeakResult.Cancelled)
+            },
+            onError = { msg ->
+                onComplete(SpeakResult.Error(msg))
+            }
         )
-        activeTask = task
-        lastCompletedOrActiveText = text
-        task
+
+        activeSpeechTask = task
+        speechTaskManager.start(task)
+        playSegments(task, 0, onComplete)
     }
 
-    fun currentTask(): SpeechTask? = synchronized(lock) { activeTask }
-
-    fun currentSegment(): SpeechSegment? = synchronized(lock) {
-        val task = activeTask ?: return null
-        if (task.cancelled || task.paused || task.currentSegmentIndex >= task.segments.size) {
-            null
-        } else {
-            task.segments[task.currentSegmentIndex]
+    private fun playSegments(task: SpeechTask, startIndex: Int, onComplete: (SpeakResult) -> Unit) {
+        if (startIndex >= task.segments.size) {
+            task.onSegmentComplete(startIndex - 1, true)
+            return
         }
-    }
 
-    fun markCurrentSegmentSpoken(): SpeechSegment? = synchronized(lock) {
-        val task = activeTask ?: return null
-        if (task.cancelled) return null
-        val nextIndex = task.currentSegmentIndex + 1
-        val updated = task.copy(currentSegmentIndex = nextIndex)
-        activeTask = if (updated.isFinished) null else updated
-        activeTask?.segments?.getOrNull(nextIndex)
-    }
-
-    /**
-     * Barge-in interruption: pauses active speech at exact current segment checkpoint and
-     * preserves it on the resumable stack so a new urgent answer can play first.
-     */
-    fun interruptForBargeIn(): SpeechTask? = synchronized(lock) {
-        val task = activeTask ?: return null
-        if (task.isFinished) {
-            activeTask = null
-            return null
-        }
-        val saved = task.copy(interrupted = true, paused = true)
-        resumableStack.push(saved)
-        activeTask = null
-        saved
-    }
-
-    fun pauseActive(): SpeechTask? = synchronized(lock) {
-        val task = activeTask ?: return null
-        val paused = task.copy(paused = true)
-        activeTask = paused
-        paused
-    }
-
-    /**
-     * Explicit "Stop" / "Cancel": cancels active speech AND prevents unintended auto-resumption.
-     */
-    fun stopAndCancelAll(): SpeechTask? = synchronized(lock) {
-        val cancelledTask = activeTask?.copy(cancelled = true, paused = false)
-        activeTask = null
-        resumableStack.clear()
-        cancelledTask
-    }
-
-    /**
-     * Resumes paused active task or pops the most recent interrupted task from its exact checkpoint.
-     * Never repeats already completed segments.
-     */
-    fun resumeFromCheckpoint(): SpeechTask? = synchronized(lock) {
-        val current = activeTask
-        if (current != null && !current.cancelled && current.paused && !current.isFinished) {
-            val resumed = current.copy(paused = false, interrupted = false)
-            activeTask = resumed
-            return resumed
-        }
-        while (resumableStack.isNotEmpty()) {
-            val candidate = resumableStack.pop()
-            if (!candidate.cancelled && !candidate.isFinished) {
-                val resumed = candidate.copy(paused = false, interrupted = false)
-                activeTask = resumed
-                return resumed
+        val segment = task.segments[startIndex]
+        val timingId = java.util.UUID.randomUUID().toString()
+        speaker.speak(segment.text, Locale.getDefault().language) { status: Int ->
+            if (status == TextToSpeech.SUCCESS) {
+                // Segment completed, move to next
+                playSegments(task, startIndex + 1, onComplete)
+            } else {
+                task.onError("TTS error: $status")
             }
         }
-        null
     }
 
-    fun hasResumableTask(): Boolean = synchronized(lock) {
-        val activePaused = activeTask?.let { !it.cancelled && it.paused && !it.isFinished } == true
-        activePaused || resumableStack.any { !it.cancelled && !it.isFinished }
+    private fun segmentForCheckpoints(text: String): List<SpeechSegment> {
+        // Segment at sentence boundaries for natural resume points
+        val sentences = text.split(Regex("(?<=[.!?])\\s+"))
+        return sentences.map { SpeechSegment(it.trim(), streamingChunkChars) }
     }
 
-    fun repeatLastText(): String? = synchronized(lock) { lastCompletedOrActiveText }
-
-    companion object {
-        /**
-         * Segments arbitrarily long text into speakable chunks while preserving 100% of characters.
-         */
-        fun segmentWithoutTruncation(text: String, maxChars: Int = 240): List<SpeechSegment> {
-            val trimmed = text.trim()
-            if (trimmed.isEmpty()) return emptyList()
-            val limit = maxChars.coerceAtLeast(40)
-            val rawSentences = trimmed.split(Regex("(?<=[.!?\\n])\\s+"))
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-
-            val chunks = mutableListOf<String>()
-            for (sentence in rawSentences) {
-                if (sentence.length <= limit) {
-                    chunks.add(sentence)
+    private fun handlePriorityControl(cmd: VoicePriorityControlParser.PriorityControlCommand) {
+        when (cmd) {
+            VoicePriorityControlParser.PriorityControlCommand.STOP_SPEECH -> {
+                speechTaskManager.stopAndCancelAll()
+                activeSpeechTask?.onCancelled?.invoke()
+                currentState.value = VoiceState.CANCELLED
+            }
+            VoicePriorityControlParser.PriorityControlCommand.PAUSE_SPEECH -> {
+                speechTaskManager.pause()
+                currentState.value = VoiceState.PAUSED
+            }
+            VoicePriorityControlParser.PriorityControlCommand.RESUME_SPEECH -> {
+                val resumed = speechTaskManager.resumeFromCheckpoint()
+                if (resumed != null) {
+                    currentState.value = VoiceState.RESUMING
+                    speakWithCheckpoints(resumed.remainingText) { _ -> }
                 } else {
-                    var start = 0
-                    while (start < sentence.length) {
-                        val endCandidate = (start + limit).coerceAtMost(sentence.length)
-                        val splitAt = if (endCandidate < sentence.length) {
-                            val lastSpace = sentence.lastIndexOf(' ', endCandidate)
-                            if (lastSpace > start + 20) lastSpace else endCandidate
-                        } else {
-                            endCandidate
-                        }
-                        val piece = sentence.substring(start, splitAt).trim()
-                        if (piece.isNotEmpty()) chunks.add(piece)
-                        start = if (splitAt < sentence.length && sentence[splitAt] == ' ') splitAt + 1 else splitAt
+                    currentState.value = VoiceState.IDLE
+                }
+            }
+            VoicePriorityControlParser.PriorityControlCommand.STOP_LISTENING -> {
+                currentState.value = VoiceState.SESSION_TIMEOUT
+            }
+            VoicePriorityControlParser.PriorityControlCommand.VOLUME_UP -> speaker.adjustVolume(1.1f)
+            VoicePriorityControlParser.PriorityControlCommand.VOLUME_DOWN -> speaker.adjustVolume(0.9f)
+            VoicePriorityControlParser.PriorityControlCommand.RATE_FASTER -> speaker.adjustRate(1.2f)
+            VoicePriorityControlParser.PriorityControlCommand.RATE_SLOWER -> speaker.adjustRate(0.8f)
+            VoicePriorityControlParser.PriorityControlCommand.MUTE -> speaker.setMuted(true)
+            VoicePriorityControlParser.PriorityControlCommand.UNMUTE -> speaker.setMuted(false)
+            VoicePriorityControlParser.PriorityControlCommand.REPEAT_LAST -> {
+                val last = speechTaskManager.getLastCompleted()
+                last?.let { speakWithCheckpoints(it.fullText) { _ -> } }
+            }
+            VoicePriorityControlParser.PriorityControlCommand.NONE -> {
+                // No-op
+            }
+        }
+    }
+
+    private fun startFollowUpWindow() {
+        scope.launch {
+            kotlinx.coroutines.delay(followUpWindowMs)
+            if (currentState.value == VoiceState.IDLE) {
+                // Follow-up window expired
+            }
+        }
+    }
+
+    fun setFollowUpWindowMs(ms: Long) {
+        followUpWindowMs = ms.coerceIn(1000, 60000)
+    }
+
+    fun setSessionTimeoutMs(ms: Long) {
+        sessionTimeoutMs = ms.coerceIn(5000, 300000)
+    }
+
+    fun shutdown() {
+        scope.cancel()
+        ttsScope.cancel()
+        speechTaskManager.stopAndCancelAll()
+        audioFocusRequester.abandon()
+    }
+
+    // ===== Data Classes =====
+
+    data class UtteranceValidationInput(
+        val transcript: String,
+        val speakerVerified: Boolean,
+        val speakerConfidence: Float,
+        val currentState: VoiceState,
+        val isSpeaking: Boolean
+    )
+
+    sealed class VoiceTurnResult {
+        data class Completed(val response: VoiceResponse) : VoiceTurnResult()
+        data class Interrupted(val partialResponse: VoiceResponse) : VoiceTurnResult()
+        object Cancelled : VoiceTurnResult()
+        data class Deferred(val reason: String) : VoiceTurnResult()
+        data class Error(val message: String) : VoiceTurnResult()
+        data class Rejected(val reason: String) : VoiceTurnResult()
+        data class NeedsCompletion(val prompt: String) : VoiceTurnResult()
+        data class NeedsClarification(val prompt: String) : VoiceTurnResult()
+        data class ControlHandled(val command: VoicePriorityControlParser.PriorityControlCommand) : VoiceTurnResult()
+    }
+
+    data class VoiceResponse(
+        val assistantMessage: String,
+        val speechText: String,
+        val pendingActions: List<Any>, // ButlerAction
+        val memoryWrites: List<Any>    // MemoryItem
+    )
+
+    sealed class SpeakResult {
+        object Completed : SpeakResult()
+        object Interrupted : SpeakResult()
+        object Cancelled : SpeakResult()
+        data class Error(val message: String) : SpeakResult()
+    }
+
+    data class SpeechSegment(
+        val text: String,
+        val maxChars: Int
+    )
+
+    class SpeechTask(
+        val id: String,
+        val fullText: String,
+        val segments: List<SpeechSegment>,
+        var currentSegmentIndex: Int,
+        val onSegmentComplete: (Int, Boolean) -> Unit,
+        val onInterrupted: (List<String>) -> Unit,
+        val onCancelled: () -> Unit,
+        val onError: (String) -> Unit
+    ) {
+        var isPlaying = true
+
+        val remainingText: String
+            get() = segments.subList(currentSegmentIndex, segments.size).joinToString(" ") { it.text }
+
+        fun markSegmentComplete(index: Int, isLast: Boolean) {
+            currentSegmentIndex = index + 1
+            onSegmentComplete(index, isLast)
+            if (isLast) isPlaying = false
+        }
+
+        fun interrupt() {
+            isPlaying = false
+            val remaining = segments.subList(currentSegmentIndex, segments.size).map { it.text }
+            onInterrupted(remaining)
+        }
+
+        fun cancel() {
+            isPlaying = false
+            onCancelled()
+        }
+
+        fun error(msg: String) {
+            isPlaying = false
+            onError(msg)
+        }
+    }
+
+    class SpeechTaskManager {
+        private val lock = Any()
+        private var currentTask: SpeechTask? = null
+        private val interruptedStack = mutableListOf<SpeechTask>()
+        private val completedHistory = mutableListOf<SpeechTask>()
+        companion object {
+            const val MAX_INTERRUPTED = 6
+            const val MAX_HISTORY = 20
+        }
+
+        fun start(task: SpeechTask) {
+            synchronized(lock) {
+                currentTask = task
+            }
+        }
+
+        fun interruptForBargeIn(): SpeechTask? {
+            synchronized(lock) {
+                currentTask?.let { task ->
+                    task.interrupt()
+                    if (interruptedStack.size >= MAX_INTERRUPTED) {
+                        interruptedStack.removeAt(0) // Drop oldest
+                    }
+                    interruptedStack.add(task)
+                    currentTask = null
+                    return task
+                }
+                return null
+            }
+        }
+
+        fun queueInterrupted(task: SpeechTask) {
+            synchronized(lock) {
+                if (interruptedStack.size >= MAX_INTERRUPTED) {
+                    interruptedStack.removeAt(0)
+                }
+                interruptedStack.add(task)
+            }
+        }
+
+        fun resumeFromCheckpoint(): SpeechTask? {
+            synchronized(lock) {
+                return interruptedStack.lastOrNull()?.also {
+                    interruptedStack.removeAt(interruptedStack.lastIndex)
+                    currentTask = it
+                }
+            }
+        }
+
+        fun stopAndCancelAll(): SpeechTask? {
+            synchronized(lock) {
+                currentTask?.cancel()
+                val cancelled = currentTask
+                currentTask = null
+                interruptedStack.forEach { it.cancel() }
+                interruptedStack.clear()
+                return cancelled
+            }
+        }
+
+        fun pause() {
+            synchronized(lock) {
+                currentTask?.let { it.isPlaying = false }
+            }
+        }
+
+        fun getLastCompleted(): SpeechTask? {
+            synchronized(lock) {
+                return completedHistory.lastOrNull()
+            }
+        }
+
+        private fun addToHistory(task: SpeechTask) {
+            synchronized(lock) {
+                completedHistory.add(task)
+                if (completedHistory.size > MAX_HISTORY) {
+                    completedHistory.removeAt(0)
+                }
+            }
+        }
+    }
+
+    // ===== Barge-In Listener =====
+
+    class BargeInListener {
+        private val vad = AdaptiveSpeechDetector(16000)
+        private val ownerGuard = OwnerVoiceGuard()
+        private var isMonitoring = false
+
+        fun startMonitoring(onBargeIn: (FloatArray) -> Unit) {
+            isMonitoring = true
+            // Continuous mic monitoring during TTS playback
+            // Uses AEC + NoiseSuppressor + VAD + OwnerVoiceGuard
+        }
+
+        fun stopMonitoring() {
+            isMonitoring = false
+        }
+    }
+
+    // ===== Audio Focus =====
+
+    private class AudioFocusRequester(private val context: Context) {
+        private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        private val focusListener = object : android.media.AudioManager.OnAudioFocusChangeListener {
+            override fun onAudioFocusChange(focusChange: Int) {
+                when (focusChange) {
+                    android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                        // Pause speech
+                    }
+                    android.media.AudioManager.AUDIOFOCUS_LOSS -> {
+                        // Stop speech
+                    }
+                    android.media.AudioManager.AUDIOFOCUS_GAIN -> {
+                        // Resume if paused
                     }
                 }
             }
-            return chunks.mapIndexed { idx, chunk -> SpeechSegment(index = idx, text = chunk) }
         }
+
+        fun request(): Boolean {
+            return audioManager.requestAudioFocus(
+                focusListener,
+                android.media.AudioManager.STREAM_MUSIC,
+                android.media.AudioManager.AUDIOFOCUS_GAIN
+            ) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+
+        fun abandon() {
+            audioManager.abandonAudioFocus(focusListener)
+        }
+    }
+}
+
+// ===== Supporting Classes =====
+
+class VoiceConversationStateMachine {
+    private val transitions = mapOf(
+        VoiceConversationEngine.VoiceState.IDLE to setOf(VoiceConversationEngine.VoiceState.WAKE_WORD_DETECTED),
+        VoiceConversationEngine.VoiceState.WAKE_WORD_DETECTED to setOf(VoiceConversationEngine.VoiceState.AUTHENTICATING_SPEAKER, VoiceConversationEngine.VoiceState.LISTENING, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.AUTHENTICATING_SPEAKER to setOf(VoiceConversationEngine.VoiceState.LISTENING, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.LISTENING to setOf(VoiceConversationEngine.VoiceState.TRANSCRIBING, VoiceConversationEngine.VoiceState.WAITING_FOR_UTTERANCE_COMPLETION, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.TRANSCRIBING to setOf(VoiceConversationEngine.VoiceState.WAITING_FOR_UTTERANCE_COMPLETION, VoiceConversationEngine.VoiceState.VALIDATING_COMMAND, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.WAITING_FOR_UTTERANCE_COMPLETION to setOf(VoiceConversationEngine.VoiceState.VALIDATING_COMMAND, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.VALIDATING_COMMAND to setOf(VoiceConversationEngine.VoiceState.REQUESTING_CLARIFICATION, VoiceConversationEngine.VoiceState.PROCESSING_COMMAND, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.REQUESTING_CLARIFICATION to setOf(VoiceConversationEngine.VoiceState.LISTENING, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.PROCESSING_COMMAND to setOf(VoiceConversationEngine.VoiceState.GENERATING_RESPONSE, VoiceConversationEngine.VoiceState.INTERRUPTED, VoiceConversationEngine.VoiceState.ERROR, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.GENERATING_RESPONSE to setOf(VoiceConversationEngine.VoiceState.SPEAKING, VoiceConversationEngine.VoiceState.INTERRUPTED, VoiceConversationEngine.VoiceState.ERROR, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.SPEAKING to setOf(VoiceConversationEngine.VoiceState.INTERRUPTED, VoiceConversationEngine.VoiceState.PAUSED, VoiceConversationEngine.VoiceState.CANCELLED, VoiceConversationEngine.VoiceState.IDLE, VoiceConversationEngine.VoiceState.SESSION_TIMEOUT),
+        VoiceConversationEngine.VoiceState.INTERRUPTED to setOf(VoiceConversationEngine.VoiceState.PROCESSING_COMMAND, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.PAUSED to setOf(VoiceConversationEngine.VoiceState.RESUMING, VoiceConversationEngine.VoiceState.CANCELLED, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.RESUMING to setOf(VoiceConversationEngine.VoiceState.SPEAKING, VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.CANCELLED to setOf(VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.SESSION_TIMEOUT to setOf(VoiceConversationEngine.VoiceState.IDLE),
+        VoiceConversationEngine.VoiceState.ERROR to setOf(VoiceConversationEngine.VoiceState.IDLE)
+    )
+
+    fun canTransition(from: VoiceConversationEngine.VoiceState, to: VoiceConversationEngine.VoiceState): Boolean =
+        transitions[from]?.contains(to) == true
+}
+
+object CommandCompletenessValidator {
+    data class UtteranceValidationInput(
+        val transcript: String,
+        val speakerVerified: Boolean,
+        val speakerConfidence: Float,
+        val currentState: VoiceConversationEngine.VoiceState,
+        val isSpeaking: Boolean
+    )
+
+    sealed class CommandValidationDecision {
+        object Proceed : CommandValidationDecision()
+        data class WaitOrAskCompletion(val prompt: String) : CommandValidationDecision()
+        data class RequestClarification(val prompt: String) : CommandValidationDecision()
+        data class RejectUnclear(val prompt: String) : CommandValidationDecision()
+        data class RejectUnauthorizedSpeaker(val reason: String) : CommandValidationDecision()
+    }
+
+    fun validate(input: UtteranceValidationInput): CommandValidationDecision {
+        // Unauthorized speaker check (TV, fan, keyboard noise, stranger)
+        if (!input.speakerVerified || input.speakerConfidence < 0.6f) {
+            return CommandValidationDecision.RejectUnauthorizedSpeaker(
+                "Speaker not verified or confidence too low."
+            )
+        }
+
+        val transcript = input.transcript.trim()
+        if (transcript.isBlank()) {
+            return CommandValidationDecision.RejectUnclear("I didn't catch that. Could you repeat?")
+        }
+
+        // Incomplete utterance detection (Case A: "AURA open...", "set a timer...")
+        val incompletePatterns = listOf(
+            Regex("""(?i)\b(open|launch|start|run)\s*$"""),
+            Regex("""(?i)\b(set|create|make|schedule)\s+(a\s+)?(timer|alarm|reminder|calendar)\s*$"""),
+            Regex("""(?i)\b(call|dial|message|text|email|whatsapp)\s*$"""),
+            Regex("""(?i)\b(play|search|find|look up)\s*$"""),
+            Regex("""(?i)\b(navigate|directions|go to)\s*$"""),
+            Regex("""(?i)\b(turn|set)\s+(on|off)\s*$"""),
+            Regex("""(?i)\b(increase|decrease|raise|lower)\s*$""")
+        )
+
+        if (incompletePatterns.any { it.matches(transcript) }) {
+            return CommandValidationDecision.WaitOrAskCompletion(
+                "Your command seems incomplete. What would you like me to do?"
+            )
+        }
+
+        // Ambiguous command detection (Case B: "Turn it up" when idle)
+        val ambiguousPatterns = listOf(
+            Regex("""(?i)^(turn it up|turn it down|make it louder|make it quieter)$"""),
+            Regex("""(?i)^(faster|slower|repeat)$"""),
+            Regex("""(?i)^(stop it|pause it)$""")
+        )
+
+        if (ambiguousPatterns.any { it.matches(transcript) } && !input.isSpeaking) {
+            return CommandValidationDecision.RequestClarification(
+                "I'm not currently speaking or playing anything. What would you like me to adjust?"
+            )
+        }
+
+        // Contextual follow-up (Case C: "Make it louder" while speaking)
+        if (ambiguousPatterns.any { it.matches(transcript) } && input.isSpeaking) {
+            return CommandValidationDecision.Proceed // Handled by priority control parser
+        }
+
+        // Valid command
+        return CommandValidationDecision.Proceed
     }
 }

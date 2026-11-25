@@ -11,12 +11,19 @@ import java.util.Locale
 /**
  * Fast UI speech using Android's installed English/Bengali/Hindi voices.
  * Piper remains an offline English fallback when Android TTS is unavailable.
+ * Extended with volume/rate/mute controls for VoiceConversationEngine priority commands.
+ * Supports segment-level callbacks for checkpoint resume.
  */
 class Speaker(context: Context) : TextToSpeech.OnInitListener {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private var systemReady = false
     private val systemTts = TextToSpeech(context.applicationContext, this)
+    
+    // Volume/rate/mute state
+    private var currentVolume = 1.0f
+    private var currentRate = 1.0f
+    private var isMuted = false
 
     override fun onInit(status: Int) {
         systemReady = status == TextToSpeech.SUCCESS
@@ -74,14 +81,23 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
+    /**
+     * Speaks text with a completion callback for segment-level checkpoint tracking.
+     * @param text Text to speak
+     * @param languageTag Language tag (e.g., "en-US", "bn-BD", "hi-IN", "auto")
+     * @param onSegmentComplete Callback with status: TextToSpeech.SUCCESS or TextToSpeech.ERROR
+     */
     fun speak(
         text: String,
         languageTag: String = "auto",
-        onUnavailable: (() -> Unit)? = null
+        onSegmentComplete: ((Int) -> Unit)? = null
     ) {
         val clean = SpeechTextSanitizer.clean(text, languageTag)
             .take(MAX_CHARACTERS)
-        if (clean.isBlank()) return
+        if (clean.isBlank()) {
+            onSegmentComplete?.invoke(TextToSpeech.SUCCESS)
+            return
+        }
 
         val resolvedLanguage = SpeechLanguageSupport.resolveLanguageTag(
             clean,
@@ -107,10 +123,18 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
                 )
                 if (result == TextToSpeech.ERROR) {
                     VoiceTimingDiagnostics.fail(appContext, timingId)
-                    speakFallback(clean, resolvedLanguage, onUnavailable)
+                    speakFallback(clean, resolvedLanguage) { status ->
+                        onSegmentComplete?.invoke(status)
+                    }
+                } else {
+                    // Success will be reported via UtteranceProgressListener.onDone
+                    // We still call the callback immediately for non-blocking flow
+                    onSegmentComplete?.invoke(TextToSpeech.SUCCESS)
                 }
             } else {
-                speakFallback(clean, resolvedLanguage, onUnavailable)
+                speakFallback(clean, resolvedLanguage) { status ->
+                    onSegmentComplete?.invoke(status)
+                }
             }
         }
     }
@@ -124,6 +148,37 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
         stop()
         systemTts.shutdown()
     }
+
+    // ===== Volume/Rate/Mute Controls for VoiceConversationEngine =====
+
+    fun adjustVolume(factor: Float) {
+        currentVolume = (currentVolume * factor).coerceIn(0.1f, 2.0f)
+        if (systemReady) {
+            systemTts.setSpeechRate(currentRate)
+            // Note: Android TTS doesn't have direct volume control per utterance
+            // Volume is typically controlled via AudioManager.STREAM_MUSIC
+        }
+    }
+
+    fun adjustRate(factor: Float) {
+        currentRate = (currentRate * factor).coerceIn(0.5f, 2.0f)
+        if (systemReady) {
+            systemTts.setSpeechRate(currentRate)
+        }
+    }
+
+    fun setMuted(muted: Boolean) {
+        isMuted = muted
+        if (muted) {
+            stop()
+        }
+    }
+
+    fun isMuted(): Boolean = isMuted
+
+    fun getCurrentVolume(): Float = currentVolume
+
+    fun getCurrentRate(): Float = currentRate
 
     private fun applyVoice(languageTag: String) {
         val locale = SpeechLanguageSupport.localeFor(languageTag)
@@ -140,14 +195,14 @@ class Speaker(context: Context) : TextToSpeech.OnInitListener {
     private fun speakFallback(
         text: String,
         languageTag: String,
-        onUnavailable: (() -> Unit)?
+        onComplete: (Int) -> Unit
     ) {
         if (languageTag != SpeechLanguageSupport.ENGLISH) {
-            onUnavailable?.invoke()
+            onComplete(TextToSpeech.ERROR)
             return
         }
         AuraVoiceRuntime.speaker.speak(text) {
-            main.post { onUnavailable?.invoke() }
+            main.post { onComplete(TextToSpeech.SUCCESS) }
         }
     }
 

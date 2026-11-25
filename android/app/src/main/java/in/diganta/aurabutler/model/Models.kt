@@ -245,6 +245,10 @@ data class AuraUiState(
     val transientMessage: String? = null,
     val speechText: String? = null,
     val speechSequence: Long = 0,
+    val chatThreads: List<ChatThread> = emptyList(),
+    val chatProjects: List<ChatProject> = emptyList(),
+    val activeThreadId: String = "",
+    val voiceSpeechSequence: Long = -1,
     val notificationAccessGranted: Boolean = false,
     val notificationVaultCount: Int = 0,
     val ownerVoiceEnrolled: Boolean = false,
@@ -261,3 +265,33 @@ internal fun JSONObject.stringMap(): Map<String, String> {
     }
     return result
 }
+
+/** One saved conversation. Its messages live in encrypted chat storage under the thread id. */
+data class ChatThread(
+    val id: String,
+    val title: String,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+    val pinned: Boolean = false,
+    val projectId: String? = null,
+    val lastMessageId: String = ""
+)
+
+/** A group of chats that share instructions for AURA. */
+data class ChatProject(
+    val id: String,
+    val name: String,
+    val instructions: String = ""
+)
+
+data class ChatSearchHit(
+    val threadId: String,
+    val title: String,
+    val snippet: String
+)
+
+data class ChatIndex(
+    val threads: List<ChatThread>,
+    val projects: List<ChatProject>,
+    val activeThreadId: String
+)

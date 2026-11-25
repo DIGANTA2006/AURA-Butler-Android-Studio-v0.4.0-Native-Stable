@@ -7,7 +7,10 @@ object SpeechTextSanitizer {
     fun clean(raw: String, languageTag: String = "auto"): String {
         if (raw.isBlank()) return ""
 
-        val language = SpeechLanguageSupport.resolveLanguageTag(raw, languageTag)
+        // Romanized Bengali (Bengali in English letters) becomes Bengali script first,
+        // so the Bengali voice pronounces it instead of English letter-to-sound rules.
+        val source = RomanizedBengali.prepareForSpeech(raw)
+        val language = SpeechLanguageSupport.resolveLanguageTag(source, languageTag)
         val thenWord = when (language) {
             SpeechLanguageSupport.BENGALI -> " তারপর "
             SpeechLanguageSupport.HINDI -> " फिर "
@@ -24,7 +27,7 @@ object SpeechTextSanitizer {
             else -> " percent"
         }
 
-        return applyPronunciation(raw, language)
+        return applyPronunciation(source, language)
             .replace(
                 Regex("""\[([^\]]+)]\((?:https?://|mailto:)[^)]+\)"""),
                 "$1"

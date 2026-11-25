@@ -45,7 +45,9 @@ import `in`.diganta.aurabutler.model.AuraUiState
 import `in`.diganta.aurabutler.model.ButlerAction
 import `in`.diganta.aurabutler.model.ButlerReply
 import `in`.diganta.aurabutler.model.ButlerSettings
+import `in`.diganta.aurabutler.chat.ChatThreadRepository
 import `in`.diganta.aurabutler.model.ChatMessage
+import `in`.diganta.aurabutler.model.ChatSearchHit
 import `in`.diganta.aurabutler.model.ConversationContext
 import `in`.diganta.aurabutler.model.MemoryItem
 import `in`.diganta.aurabutler.model.ReminderItem
@@ -122,10 +124,12 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             "Owner voice is not registered yet."
         }
     )
+    private val chatRepo = ChatThreadRepository(application)
     private val _uiState = MutableStateFlow(initialState)
     val uiState: StateFlow<AuraUiState> = _uiState.asStateFlow()
 
     init {
+        bootstrapChats()
         // loadPendingActions() filters expired/legacy entries. Persist the clean
         // list immediately so stale approvals cannot survive indefinitely on disk.
         store.savePendingActions(initialState.pendingActions)
@@ -153,10 +157,10 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun submitVoiceText(text: String) {
         setInput(text)
-        submitText(text)
+        submitText(text, fromVoice = true)
     }
 
-    fun submitText(text: String) {
+    fun submitText(text: String, fromVoice: Boolean = false) {
         if (_uiState.value.isBusy || text.isBlank()) return
         val before = _uiState.value
         val userMessage = ChatMessage(sender = Sender.USER, text = text.trim())
@@ -178,7 +182,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val requestContext = ConversationContext(
                     recentMessages = before.messages.takeLast(16),
-                    memories = before.memories,
+                    memories = before.memories + chatRepo.projectMemory(before.activeThreadId),
                     settings = before.settings
                 )
                 val planCommand = parsePlanningCommand(text.trim())
@@ -336,6 +340,7 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
                         streamingPreview = "",
                         transientMessage = directMessages.lastOrNull(),
                         speechText = if (current.settings.spokenReplies) speechText else null,
+                        voiceSpeechSequence = if (fromVoice) current.speechSequence + 1 else current.voiceSpeechSequence,
                         speechSequence = current.speechSequence + 1
                     )
                 }
@@ -1095,6 +1100,126 @@ class ButlerViewModel(application: Application) : AndroidViewModel(application) 
         }
         refreshProactiveSuggestions()
     }
+
+    // ---- Chats: threads, pinning, projects and search ----
+
+    fun startNewChat(projectId: String? = null) {
+        if (_uiState.value.isBusy) {
+            showMessage("Wait for the current reply to finish before starting a new chat.")
+            return
+        }
+        val thread = chatRepo.createThread(projectId)
+        activateChat(thread.id, persistCurrent = true)
+    }
+
+    fun switchChat(threadId: String) {
+        val current = _uiState.value
+        if (threadId == current.activeThreadId) return
+        if (current.isBusy) {
+            showMessage("Wait for the current reply to finish before switching chats.")
+            return
+        }
+        activateChat(threadId, persistCurrent = true)
+    }
+
+    fun deleteChat(threadId: String) {
+        val current = _uiState.value
+        if (current.isBusy) {
+            showMessage("Wait for the current reply to finish before deleting a chat.")
+            return
+        }
+        val wasActive = threadId == current.activeThreadId
+        chatRepo.deleteThread(threadId)
+        if (!wasActive) {
+            refreshChatList()
+            return
+        }
+        val next = chatRepo.index().threads.maxByOrNull { it.updatedAtEpochMs }
+        if (next != null) {
+            activateChat(next.id, persistCurrent = false)
+        } else {
+            startNewChat()
+        }
+    }
+
+    fun renameChat(threadId: String, title: String) {
+        chatRepo.renameThread(threadId, title)
+        refreshChatList()
+    }
+
+    fun togglePinChat(threadId: String) {
+        chatRepo.togglePin(threadId)
+        refreshChatList()
+    }
+
+    fun moveChatToProject(threadId: String, projectId: String?) {
+        chatRepo.moveThread(threadId, projectId)
+        refreshChatList()
+    }
+
+    fun createChatProject(name: String, instructions: String) {
+        chatRepo.createProject(name, instructions)
+        refreshChatList()
+    }
+
+    fun deleteChatProject(projectId: String) {
+        chatRepo.deleteProject(projectId)
+        refreshChatList()
+    }
+
+    /** Saves the active chat's messages into its thread and refreshes the list. Runs off the main thread. */
+    fun syncActiveChat() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val current = _uiState.value
+            chatRepo.saveMessages(current.activeThreadId, current.messages)
+            refreshChatList()
+        }
+    }
+
+    suspend fun searchChats(query: String): List<ChatSearchHit> =
+        withContext(Dispatchers.IO) { chatRepo.search(query) }
+
+    private fun refreshChatList() {
+        val index = chatRepo.index()
+        _uiState.update { it.copy(chatThreads = index.threads, chatProjects = index.projects) }
+    }
+
+    private fun activateChat(threadId: String, persistCurrent: Boolean) {
+        val current = _uiState.value
+        if (persistCurrent) {
+            chatRepo.saveMessages(current.activeThreadId, current.messages)
+        }
+        val target = chatRepo.loadMessages(threadId).ifEmpty { listOf(freshGreeting()) }
+        store.saveMessages(target)
+        store.savePendingActions(emptyList())
+        chatRepo.setActive(threadId)
+        val index = chatRepo.index()
+        _uiState.update {
+            it.copy(
+                messages = target,
+                pendingActions = emptyList(),
+                activeThreadId = threadId,
+                chatThreads = index.threads,
+                chatProjects = index.projects
+            )
+        }
+    }
+
+    private fun bootstrapChats() {
+        val index = chatRepo.bootstrap(store.loadMessages(), freshGreeting())
+        _uiState.update {
+            it.copy(
+                chatThreads = index.threads,
+                chatProjects = index.projects,
+                activeThreadId = index.activeThreadId
+            )
+        }
+    }
+
+    private fun freshGreeting(): ChatMessage = ChatMessage(
+        sender = Sender.AURA,
+        text = "A fresh conversation is ready. What may I take care of?"
+    )
 
     fun clearConversation() {
         val greeting = ChatMessage(

@@ -24,6 +24,9 @@ import `in`.diganta.aurabutler.runtime.IntentRoute
 import `in`.diganta.aurabutler.runtime.ProductionIntentRouter
 import `in`.diganta.aurabutler.runtime.SecretRedactor
 import `in`.diganta.aurabutler.runtime.StudentBudgetGuard
+import `in`.diganta.aurabutler.runtime.OperatingMode
+import `in`.diganta.aurabutler.runtime.ExecutionPolicyEngine
+import `in`.diganta.aurabutler.runtime.ExecutionMode
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -44,6 +47,9 @@ import kotlinx.coroutines.ensureActive
  * Deterministic commands and private memory are attempted first. The local
  * trained intent router supplies bounded classification. Optional cloud AI is
  * reached only through LocalButlerEngine's unresolved-request fallback.
+ *
+ * Phase 1: OperatingMode-aware routing, DEVICE_ONLY bypasses all cloud budget,
+ * token-aware streaming (no fixed char caps), AdaptiveResourceGovernor integration.
  */
 class ProductionButlerEngine(
     context: Context,
@@ -59,6 +65,7 @@ class ProductionButlerEngine(
     private val newsCommands by lazy { NewsCommandEngine(store) }
     private val commandInterpreter by lazy { GeminiCommandInterpreter() }
     private val structuredAgent by lazy { StructuredAgentProvider() }
+    private val executionPolicy = ExecutionPolicyEngine()
 
     @Volatile
     private var semanticMemoryInstance: SemanticMemory? = null
@@ -161,6 +168,11 @@ class ProductionButlerEngine(
         }
     }
 
+    /**
+     * Main chat entry point with OperatingMode-aware routing.
+     * DEVICE_ONLY: zero network calls, full local capability, no budget checks.
+     * Streaming: token-aware, no fixed character truncation.
+     */
     suspend fun chat(
         message: String,
         context: ConversationContext,
@@ -172,6 +184,7 @@ class ProductionButlerEngine(
         var commandRepairMs = 0L
         var agentMs = 0L
         var delegatedAiMs = 0L
+
         val bridgedMessage = MultilingualCommandBridge.normalizeKnownCommand(message)
         val normalization = CommandNormalizer.normalize(
             bridgedMessage,
@@ -179,6 +192,7 @@ class ProductionButlerEngine(
         )
         var effectiveMessage = normalization.corrected
         var repairApplied = false
+
         AuraRuntimeStateMachine.startIfNeeded()
         AuraRuntimeStateMachine.safeTransition(
             AuraRuntimeState.THINKING,
@@ -189,6 +203,9 @@ class ProductionButlerEngine(
             router.route(effectiveMessage)
         }
 
+        // Resolve operating mode from settings (with legacy migration)
+        val operatingMode = context.settings.operatingMode
+
         return try {
             val deterministicStartedAt = SystemClock.elapsedRealtime()
             var direct = withTimeoutOrNull(
@@ -197,7 +214,8 @@ class ProductionButlerEngine(
                 deterministicReply(
                     message = effectiveMessage,
                     route = route,
-                    context = context
+                    context = context,
+                    operatingMode = operatingMode
                 )
             }
             deterministicMs += SystemClock.elapsedRealtime() - deterministicStartedAt
@@ -251,7 +269,8 @@ class ProductionButlerEngine(
                         deterministicReply(
                             message = effectiveMessage,
                             route = route,
-                            context = context
+                            context = context,
+                            operatingMode = operatingMode
                         )
                     }
                     deterministicMs += SystemClock.elapsedRealtime() - repairedDeterministicStartedAt
@@ -268,7 +287,7 @@ class ProductionButlerEngine(
                 val agentStartedAt = SystemClock.elapsedRealtime()
                 direct = try {
                     withTimeoutOrNull(remainingTurnMs(turnDeadlineAt, AGENT_TIMEOUT_MS)) {
-                        runStructuredAgent(effectiveMessage, intelligenceContext)
+                        runStructuredAgent(effectiveMessage, intelligenceContext, operatingMode)
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -283,8 +302,7 @@ class ProductionButlerEngine(
                     store.searchMemories(effectiveMessage, 10) + intelligenceContext.memories
                 ).distinctBy(MemoryItem::id).take(10)
 
-                // Never send a likely secret to an optional provider. The
-                // deterministic local engine can still explain the restriction.
+                // Never send a likely secret to an optional provider.
                 val safeContext = if (
                     SecretRedactor.containsLikelySecret(effectiveMessage) &&
                     route.intent in CLOUD_ELIGIBLE_INTENTS
@@ -311,7 +329,7 @@ class ProductionButlerEngine(
                 )
                 delegatedAiMs += SystemClock.elapsedRealtime() - delegatedStartedAt
                 delegatedReply.copy(
-                    provider = inferProvider(route, safeContext),
+                    provider = inferProvider(route, safeContext, operatingMode),
                     intent = route.intent
                 )
             }
@@ -354,7 +372,8 @@ class ProductionButlerEngine(
                     "effective_request" to effectiveMessage.take(180),
                     "command_corrected" to (
                         normalization.changed || repairApplied
-                    )
+                    ),
+                    "operating_mode" to operatingMode.wireName
                 )
             )
             AuraRuntimeStateMachine.forceIdleUnlessListening("turn completed")
@@ -409,13 +428,107 @@ class ProductionButlerEngine(
     }
 
     /**
+     * Streaming chat variant for voice/UI streaming display.
+     * No fixed character truncation; token-aware chunked continuation.
+     */
+    suspend fun chatStreaming(
+        message: String,
+        context: ConversationContext,
+        onDelta: (String) -> Unit,
+        onComplete: (ButlerReply) -> Unit
+    ) {
+        val operatingMode = context.settings.operatingMode
+
+        // For DEVICE_ONLY, we still stream local responses for consistent UX
+        if (operatingMode == OperatingMode.DEVICE_ONLY) {
+            val reply = chat(message, context) // Local is fast, no real streaming needed
+            onDelta(reply.assistantMessage)
+            onComplete(reply)
+            return
+        }
+
+        // For cloud modes, delegate to HybridAiProvider streaming
+        val bridgedMessage = MultilingualCommandBridge.normalizeKnownCommand(message)
+        val normalization = CommandNormalizer.normalize(
+            bridgedMessage,
+            context.settings.smartCommandCorrection
+        )
+        var effectiveMessage = normalization.corrected
+
+        var route = withContext(Dispatchers.Default) {
+            router.route(effectiveMessage)
+        }
+
+        // Try deterministic first
+        val direct = deterministicReply(
+            message = effectiveMessage,
+            route = route,
+            context = context,
+            operatingMode = operatingMode
+        )
+
+        if (direct != null) {
+            // Stream the local response in chunks for consistent UX
+            streamLocalResponse(direct, onDelta, onComplete)
+            return
+        }
+
+        // Delegate to streaming AI
+        val relevant = (
+            store.searchMemories(effectiveMessage, 10) + context.memories
+        ).distinctBy(MemoryItem::id).take(10)
+
+        val safeContext = if (
+            SecretRedactor.containsLikelySecret(effectiveMessage) &&
+            route.intent in CLOUD_ELIGIBLE_INTENTS
+        ) {
+            context.copy(
+                memories = relevant,
+                settings = context.settings.copy(aiEnabled = false)
+            )
+        } else {
+            context.copy(memories = relevant)
+        }
+
+        val delegatedReply = delegate.chat(
+            message = effectiveMessage,
+            context = safeContext,
+            onPartial = onDelta
+        )
+
+        onComplete(delegatedReply.copy(
+            provider = inferProvider(route, safeContext, operatingMode),
+            intent = route.intent
+        ))
+    }
+
+    private fun streamLocalResponse(
+        reply: ButlerReply,
+        onDelta: (String) -> Unit,
+        onComplete: (ButlerReply) -> Unit
+    ) {
+        // Chunk the response for streaming display (simulated streaming for local)
+        val text = reply.assistantMessage
+        val chunkSize = 80 // Characters per chunk for smooth UI
+        var index = 0
+        while (index < text.length) {
+            val end = (index + chunkSize).coerceAtMost(text.length)
+            onDelta(text.substring(index, end))
+            index = end
+            Thread.sleep(16) // ~60fps visual update
+        }
+        onComplete(reply)
+    }
+
+    /**
      * Qwen decomposes a genuinely multi-step request, but every step is executed
      * by AURA's bounded deterministic experts. The model never receives direct
      * Android control and all resulting actions still pass the normal approval layer.
      */
     private suspend fun runStructuredAgent(
         message: String,
-        context: ConversationContext
+        context: ConversationContext,
+        operatingMode: OperatingMode
     ): ButlerReply? {
         if (SecretRedactor.containsLikelySecret(message)) return null
         val relevant = store.searchMemories(message, 6)
@@ -437,7 +550,7 @@ class ProductionButlerEngine(
             val stepRoute = withContext(Dispatchers.Default) {
                 router.route(step.command)
             }
-            val reply = deterministicReply(step.command, stepRoute, localContext)
+            val reply = deterministicReply(step.command, stepRoute, localContext, operatingMode)
                 ?: delegate.chat(step.command, localContext)
             val unusable = reply.assistantMessage.contains(
                 "needs optional AI reasoning",
@@ -486,7 +599,8 @@ class ProductionButlerEngine(
     private suspend fun deterministicReply(
         message: String,
         route: IntentRoute,
-        context: ConversationContext
+        context: ConversationContext,
+        operatingMode: OperatingMode
     ): ButlerReply? {
         youtubeAutoplay.handle(message, context)?.let {
             return it
@@ -503,14 +617,16 @@ class ProductionButlerEngine(
         return handleProductionCommand(
             message = message,
             route = route,
-            context = context
+            context = context,
+            operatingMode = operatingMode
         )
     }
 
     private fun handleProductionCommand(
         message: String,
         route: IntentRoute,
-        context: ConversationContext
+        context: ConversationContext,
+        operatingMode: OperatingMode
     ): ButlerReply? {
         val normalized = route.normalizedText
 
@@ -629,6 +745,15 @@ class ProductionButlerEngine(
             )
         }
 
+        // OperatingMode-aware: in DEVICE_ONLY, cloud-eligible intents return local fallback
+        val executionMode = executionPolicy.resolve(operatingMode, message, context.settings, route.intent)
+        if (operatingMode == OperatingMode.DEVICE_ONLY && executionMode != ExecutionMode.LOCAL_COMMAND && executionMode != ExecutionMode.LOCAL_REASONING) {
+            return localReply(
+                text = "DEVICE_ONLY mode: this request needs cloud AI. Enable private cloud or use a local command.",
+                intent = "device_only_fallback"
+            )
+        }
+
         return null
     }
 
@@ -724,11 +849,18 @@ class ProductionButlerEngine(
 
     private fun inferProvider(
         route: IntentRoute,
-        context: ConversationContext
+        context: ConversationContext,
+        operatingMode: OperatingMode
     ): String = when {
         route.intent in KEYLESS_INTENTS -> "keyless-internet"
-        route.intent in CLOUD_ELIGIBLE_INTENTS ->
-            HybridAiProvider.configuredProviderLabel(context.settings)
+        route.intent in CLOUD_ELIGIBLE_INTENTS -> {
+            when (operatingMode) {
+                OperatingMode.DEVICE_ONLY -> "local-fallback"
+                OperatingMode.PRIVATE_CLOUD -> "private-qwen"
+                OperatingMode.PUBLIC_CLOUD -> HybridAiProvider.configuredProviderLabel(context.settings)
+                OperatingMode.AUTOMATIC -> HybridAiProvider.configuredProviderLabel(context.settings)
+            }
+        }
         else -> "local"
     }
 

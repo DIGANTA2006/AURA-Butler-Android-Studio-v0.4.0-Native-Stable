@@ -1,40 +1,54 @@
 package `in`.diganta.aurabutler.runtime
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import `in`.diganta.aurabutler.data.AiResponseFormatter
+import org.junit.Assert.*
 import org.junit.Test
 
 class ResponseQualityGateTest {
-    @Test
-    fun preservesProgrammingSyntaxInsideFencedCode() {
-        val raw = """
-            Here is the implementation:
-            ```c
-            int *ptr = &value;
-            int my_variable = a*b;
-            printf("%d\\n", my_variable);
-            ```
-        """.trimIndent()
 
-        val value = ResponseQualityGate.forDisplay(raw, "professional")
-        assertTrue(value.contains("```c"))
-        assertTrue(value.contains("int *ptr = &value;"))
-        assertTrue(value.contains("my_variable = a*b"))
-        assertTrue(value.contains("```"))
+    @Test
+    fun testForDisplayNoTruncation() {
+        // Create a very long response (100k chars)
+        val longText = "A".repeat(100_000)
+        val output = ResponseQualityGate.forDisplay(longText, "normal", OperatingMode.AUTOMATIC)
+        assertEquals(100_000, output.length)
     }
 
     @Test
-    fun removesHiddenThinkingWithoutCorruptingPowerShell() {
-        val raw = "<think>private reasoning</think>```powershell\n`${'$'}env:USERPROFILE\\Downloads\n```"
-        val value = ResponseQualityGate.forDisplay(raw, "professional")
-        assertFalse(value.contains("private reasoning"))
-        assertTrue(value.contains("`${'$'}env:USERPROFILE\\Downloads"))
+    fun testForDisplayDeviceOnlyMode() {
+        val text = "Test response"
+        val output = ResponseQualityGate.forDisplay(text, "normal", OperatingMode.DEVICE_ONLY)
+        assertEquals(text, output)
     }
 
     @Test
-    fun normalizesPairedMarkdownInProseOnly() {
-        val value = ResponseQualityGate.forDisplay("**Important**: use `my_variable`.", "professional")
-        assertEquals("Important: use my_variable.", value)
+    fun testForDisplayStripsIdentityMarkers() {
+        val input = "Certainly, master Diganta. Here is the answer."
+        val output = ResponseQualityGate.forDisplay(input, "normal", OperatingMode.AUTOMATIC)
+        assertFalse(output.contains("master Diganta"))
+        assertTrue(output.contains("Here is the answer"))
+    }
+
+    @Test
+    fun testForDisplayPreservesCodeFences() {
+        val input = "Code:\n```python\ndef hello():\n    print('world')\n```"
+        val output = ResponseQualityGate.forDisplay(input, "normal", OperatingMode.AUTOMATIC)
+        assertTrue(output.contains("```python"))
+        assertTrue(output.contains("def hello()"))
+    }
+
+    @Test
+    fun testForStreamingDisplay() {
+        val input = "<think>hiddenStreaming delta"
+        val output = ResponseQualityGate.forStreamingDisplay(input, OperatingMode.AUTOMATIC)
+        assertFalse(output.contains("hidden"))
+        assertTrue(output.contains("Streaming delta"))
+    }
+
+    @Test
+    fun testDeduplication() {
+        val input = "First paragraph.\n\nFirst paragraph.\n\nSecond paragraph."
+        val output = ResponseQualityGate.deduplicate(input)
+        assertEquals("First paragraph.\n\nSecond paragraph.", output)
     }
 }

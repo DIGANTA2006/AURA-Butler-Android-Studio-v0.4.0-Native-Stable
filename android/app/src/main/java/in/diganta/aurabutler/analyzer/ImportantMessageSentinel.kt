@@ -49,10 +49,7 @@ object ImportantMessageSentinel {
     ) {
         if (!settings.importantMessageVoiceAlerts) return
         if (item.priority.weight < NotificationPriority.IMPORTANT.weight) return
-        if (
-            item.priority != NotificationPriority.CRITICAL &&
-            item.channel !in SPEAKABLE_CHANNELS
-        ) return
+        if (!isSpeakableSource(item)) return
 
         val audioManager = context.getSystemService(AudioManager::class.java)
         if (audioManager.mode != AudioManager.MODE_NORMAL) {
@@ -202,9 +199,30 @@ object ImportantMessageSentinel {
 
     private val SPEAKABLE_CHANNELS = setOf(
         AnalyzerChannel.WHATSAPP,
-        AnalyzerChannel.MAIL,
-        AnalyzerChannel.SLACK,
-        AnalyzerChannel.JIRA,
-        AnalyzerChannel.MESSAGING
+        AnalyzerChannel.MAIL
     )
+
+    private val COLLEGE_APP_HINTS = listOf("classroom", "moodle", "college", "university", "campus")
+
+    private val COLLEGE_TERMS = Regex(
+        """\b(?:college|cemk|kolaghat|makaut|university|classroom|class|exam|exams|lab|labs|attendance|assignment|hostel|semester|professor|principal|viva|notice|admit card)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * Speaks only WhatsApp, mail and college-related notifications.
+     * Other apps (SMS, Slack, Jira, Telegram, shopping, banks) stay on screen,
+     * even when the classifier marks them CRITICAL.
+     */
+    internal fun isSpeakableSource(item: CapturedNotification): Boolean {
+        if (item.channel in SPEAKABLE_CHANNELS) return true
+        return isCollegeRelated(item)
+    }
+
+    internal fun isCollegeRelated(item: CapturedNotification): Boolean {
+        val app = "${item.packageName} ${item.appName}".lowercase()
+        if (COLLEGE_APP_HINTS.any { app.contains(it) }) return true
+        val text = "${item.title} ${item.sender} ${item.text} ${item.subText}"
+        return COLLEGE_TERMS.containsMatchIn(text)
+    }
 }

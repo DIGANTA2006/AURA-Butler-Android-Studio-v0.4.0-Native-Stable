@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.AtomicFile
 import java.io.File
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -68,23 +69,23 @@ data class BudgetSnapshot(
 }
 
 /**
- * Student budget limits loaded from remote manifest (with hardcoded fallbacks).
- * Limits are fetched once at startup via StudentBudgetConfig.initialize().
+ * Student budget policy — evaluates cloud budget against remote manifest.
+ * DEVICE_ONLY mode bypasses this entirely (see StudentBudgetGuard.tryReserve).
  */
 object StudentBudgetPolicy {
-    /** Current daily text request limit (from remote manifest or fallback). */
+    /** Current daily text request limit (from remote manifest or 0 = unlimited). */
     val DAILY_TEXT_LIMIT: Int
         get() = StudentBudgetConfig.DAILY_TEXT_LIMIT
 
-    /** Current daily vision request limit (from remote manifest or fallback). */
+    /** Current daily vision request limit (from remote manifest or 0 = unlimited). */
     val DAILY_VISION_LIMIT: Int
         get() = StudentBudgetConfig.DAILY_VISION_LIMIT
 
-    /** Current daily research request limit (from remote manifest or fallback). */
+    /** Current daily research request limit (from remote manifest or 0 = unlimited). */
     val DAILY_RESEARCH_LIMIT: Int
         get() = StudentBudgetConfig.DAILY_RESEARCH_LIMIT
 
-    /** Current daily auxiliary request limit (from remote manifest or fallback). */
+    /** Current daily auxiliary request limit (from remote manifest or 0 = unlimited). */
     val DAILY_AUXILIARY_LIMIT: Int
         get() = StudentBudgetConfig.DAILY_AUXILIARY_LIMIT
 
@@ -114,7 +115,7 @@ object StudentBudgetPolicy {
     ): BudgetDecision {
         val limit = limitFor(workload)
         if (limit == 0) {
-            return BudgetDecision(true, null, "Unlimited by owner configuration.")
+            return BudgetDecision(true, null, "Unlimited by owner configuration (JARVIS MODE).")
         }
         val used = snapshot.count(workload)
         if (used >= limit) {
@@ -170,11 +171,8 @@ object StudentBudgetPolicy {
 }
 
 /**
- * Local non-secret usage ledger.
- *
- * v0.17.2 uses a reservation/commit flow: selecting a provider does not burn a
- * local quota unit. A unit is committed only after that provider returns a
- * usable response. Failed fallbacks release their reservation.
+ * Local non-secret usage ledger with reserve/commit/release semantics.
+ * DEVICE_ONLY mode: ALWAYS returns allowed=true, metered=false, zero quota consumption.
  */
 object StudentBudgetGuard {
     private data class Reservation(
@@ -189,7 +187,7 @@ object StudentBudgetGuard {
     @Volatile private var initializationJob: Job? = null
 
     /**
-     * Startup must remain non-blocking. The hardcoded safe limits are available
+     * Startup must remain non-blocking. The hardcoded safe limits (0 = unlimited) are available
      * immediately; remote manifest limits are loaded on IO and atomically applied.
      */
     fun initialize(context: Context) {
@@ -200,17 +198,33 @@ object StudentBudgetGuard {
                 return
             }
             initializationJob = initializationScope.launch {
-                // Preserve structured cancellation; a stopped app scope must not
-                // turn CancellationException into an ordinary config failure.
                 runCatchingCancellable { StudentBudgetConfig.initialize(app) }
             }
         }
     }
 
+    /**
+     * Reserve a budget unit for a cloud workload.
+     * Returns allowed=true, metered=false for DEVICE_ONLY endpoints (localhost, private LAN).
+     * For metered endpoints, checks remote manifest limits via reservation ledger.
+     */
     fun tryReserve(
         workload: AiWorkload,
-        endpoint: String
+        endpoint: String,
+        operatingMode: OperatingMode = OperatingMode.AUTOMATIC
     ): BudgetLease {
+        // DEVICE_ONLY mode: NEVER meters, NEVER blocks, ZERO network calls
+        if (operatingMode == OperatingMode.DEVICE_ONLY) {
+            return BudgetLease(
+                allowed = true,
+                remainingToday = null,
+                message = "DEVICE_ONLY mode: local execution, no cloud budget consumed.",
+                workload = workload,
+                metered = false
+            )
+        }
+
+        // Local endpoints (Ollama, LAN) are never metered
         if (!StudentBudgetPolicy.isMeteredEndpoint(endpoint)) {
             return BudgetLease(
                 allowed = true,
@@ -273,12 +287,12 @@ object StudentBudgetGuard {
      * Compatibility shim for older code. New provider paths should use
      * tryReserve()/commit()/release() so failures do not consume local quota.
      */
-    @Deprecated("Use tryReserve/commit/release")
+    @Deprecated("Use tryReserve/commit/release with OperatingMode")
     fun tryAcquire(
         workload: AiWorkload,
         endpoint: String
     ): BudgetDecision {
-        val lease = tryReserve(workload, endpoint)
+        val lease = tryReserve(workload, endpoint, OperatingMode.AUTOMATIC)
         if (lease.allowed) commit(lease)
         return BudgetDecision(lease.allowed, lease.remainingToday, lease.message)
     }
@@ -314,7 +328,7 @@ object StudentBudgetGuard {
         val file = ledgerFile() ?: return null
         return runCatching {
             val root = file.openRead().use { input ->
-                JSONObject(input.bufferedReader(Charsets.UTF_8).readText())
+                JSONObject(input.bufferedReader(StandardCharsets.UTF_8).readText())
             }
             BudgetSnapshot(
                 utcDay = root.optString("utc_day"),
@@ -335,7 +349,7 @@ object StudentBudgetGuard {
             .put("research", snapshot.research)
             .put("auxiliary", snapshot.auxiliary)
             .toString()
-            .toByteArray(Charsets.UTF_8)
+            .toByteArray(StandardCharsets.UTF_8)
         var stream: java.io.FileOutputStream? = null
         try {
             val output = file.startWrite()

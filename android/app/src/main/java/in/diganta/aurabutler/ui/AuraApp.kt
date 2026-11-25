@@ -49,6 +49,7 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ClearAll
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Directions
@@ -146,6 +147,7 @@ import `in`.diganta.aurabutler.model.Sender
 import `in`.diganta.aurabutler.ui.theme.AuraGold
 import `in`.diganta.aurabutler.ui.theme.AuraGreen
 import `in`.diganta.aurabutler.voice.Speaker
+import `in`.diganta.aurabutler.voice.SpeechLanguageSupport
 import `in`.diganta.aurabutler.voice.VoiceTimingDiagnostics
 import `in`.diganta.aurabutler.voice.VoiceManager
 import java.time.Instant
@@ -362,7 +364,7 @@ fun AuraApp(viewModel: ButlerViewModel) {
     }
 
     LaunchedEffect(state.speechSequence) {
-        state.speechText?.let { text ->
+        state.speechText?.takeIf { state.speechSequence == state.voiceSpeechSequence }?.let { text ->
             if (state.settings.wakeWordEnabled) {
                 // Route speech through the service so it can release the wake
                 // model before Piper allocates its native model.
@@ -370,7 +372,7 @@ fun AuraApp(viewModel: ButlerViewModel) {
             } else {
                 speaker.speak(text, state.settings.speechLanguage) {
                     viewModel.showMessage(
-                        "AURA could not start either local voice. Raise media volume, then use Test AURA voice in Settings."
+                        SpeechLanguageSupport.voiceUnavailableMessage(text, state.settings.speechLanguage)
                     )
                 }
             }
@@ -474,6 +476,8 @@ fun AuraApp(viewModel: ButlerViewModel) {
         }
     }
 
+    var showChatHub by remember { mutableStateOf(false) }
+    ChatHubSheet(viewModel = viewModel, visible = showChatHub, onDismiss = { showChatHub = false })
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
@@ -513,6 +517,9 @@ fun AuraApp(viewModel: ButlerViewModel) {
                 },
                 actions = {
                     if (state.selectedTab == AppTab.BUTLER) {
+                        IconButton(onClick = { showChatHub = true }) {
+                            Icon(Icons.Rounded.Forum, contentDescription = "Chats")
+                        }
                         IconButton(onClick = { clearDialogVisible = true }) {
                             Icon(Icons.Rounded.ClearAll, contentDescription = "Clear conversation")
                         }
@@ -1740,10 +1747,11 @@ private fun SettingsScreen(
                 )
             }
         }
+        item { PrivacyCenterEntry() }
         item {
             SwitchRow(
                 title = "Speak replies",
-                subtitle = "Android TTS automatically selects English, Bengali or Hindi. Piper remains the private offline English fallback.",
+                subtitle = "Only voice turns are spoken: the mic button or the word Aura. Typed chats stay silent. Bengali, including romanized Bengali, uses the Bengali voice.",
                 checked = draft.spokenReplies,
                 onChecked = { draft = draft.copy(spokenReplies = it) }
             )
@@ -2073,7 +2081,7 @@ private fun SettingsScreen(
         item {
             SwitchRow(
                 title = "Tell me important messages immediately",
-                subtitle = "For locally classified important WhatsApp, mail, SMS, Slack, Jira and messaging notifications, AURA speaks an alert immediately. This classifier does not require cloud AI.",
+                subtitle = "AURA speaks an alert only for important WhatsApp, mail and college notifications (college, classroom, exam, notice and similar). Other apps stay on screen. Runs fully on the phone.",
                 checked = draft.importantMessageVoiceAlerts,
                 onChecked = {
                     draft = draft.copy(importantMessageVoiceAlerts = it)
